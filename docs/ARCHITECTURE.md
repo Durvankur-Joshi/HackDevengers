@@ -141,8 +141,42 @@ FastAPI Backend (pipeline/preprocessing.py)
 [Phase 5: OCR Engine consumes 200 DPI normalized PNGs independently]
 ```
 
-> **Decoupled Architecture Rule**: The preprocessing layer is strictly responsible for physical document normalization, orientation, rasterization, and local caching. It **does NOT** extract text, perform OCR, invoke Gemini, or perform schema recognition.
+### OCR Extraction & Layout-Aware Representation (Phase 5)
 
+```
+Document
+↓
+Preprocessing
+↓
+OCR (Tesseract Engine via pytesseract)
+↓
+OCR Result
+├── Full Text (Multi-page with delimiters)
+├── Blocks (Ordered text lines)
+├── Bounding Boxes (x, y, width, height in pixels)
+└── Confidence (Block & Document Average)
+```
+
+> **Decoupled Architecture Rule**: The OCR layer is an independent service isolated from both preprocessing and semantic reasoning. OCR is intentionally separated from Gemini-based semantic extraction: OCR produces grounded physical text tokens with pixel bounding boxes and confidence metrics without invoking LLMs. Gemini is only invoked downstream for schema structuring.
+
+### Document Classification (Phase 6)
+
+```
+OCR Result
+↓
+Classification Input Builder (Bounded layout-aware text)
+↓
+Gemini Semantic Classifier (response_schema=GeminiClassificationOutput)
+↓
+Confidence Threshold Filter (default >= 0.70)
+↓
+Classification Result
+├── invoice
+├── onboarding_form
+└── unknown
+```
+
+> **Decoupled Architecture Rule**: Classification uses structured OCR output (not raw images/PDFs) and Google Gemini semantic understanding. Gemini categorizes the document strictly into `invoice`, `onboarding_form`, or `unknown`. Any document that does not explicitly match the two supported archetypes (e.g. resumes, portfolios, general letters, menus) or falls below the confidence threshold is deterministically routed to `unknown`.
 
 ---
 

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS documents (
             'preprocessing',
             'preprocessed',
             'ocr',
+            'ocr_completed',
             'classified',
             'extracting',
             'validating',
@@ -58,6 +59,24 @@ CREATE TABLE IF NOT EXISTS documents (
 
 -- Ensure storage_path exists if documents table already existed from Phase 2
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_path TEXT;
+
+-- Update status constraint to support 'ocr_completed' (Phase 5)
+ALTER TABLE documents DROP CONSTRAINT IF EXISTS chk_documents_status;
+ALTER TABLE documents ADD CONSTRAINT chk_documents_status CHECK (
+    status IN (
+        'uploaded',
+        'preprocessing',
+        'preprocessed',
+        'ocr',
+        'ocr_completed',
+        'classified',
+        'extracting',
+        'validating',
+        'completed',
+        'needs_review',
+        'failed'
+    )
+);
 
 -- Trigger for documents.updated_at
 DROP TRIGGER IF EXISTS trg_documents_updated_at ON documents;

@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
+    TESSERACT_CMD: str = ""
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    CLASSIFICATION_CONFIDENCE_THRESHOLD: float = 0.70
 
     model_config = SettingsConfigDict(
         env_file=".env",

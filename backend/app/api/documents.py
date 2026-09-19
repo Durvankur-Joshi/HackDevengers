@@ -2,12 +2,24 @@ import os
 import re
 import uuid
 import logging
-from typing import Optional
+import glob
+import json
+from typing import Optional, List
+from PIL import Image
 from fastapi import APIRouter, UploadFile, File, HTTPException, status
 from app.schemas import DocumentResponse, DocumentPreviewResponse
-from app.pipeline.types import PreprocessingResult
+from app.pipeline.types import (
+    PreprocessingResult,
+    OCRDocumentResult,
+    PreprocessedPage,
+    DocumentClassificationResult,
+)
+from app.pipeline.ocr import get_ocr_engine, OCREngineUnavailableError, OCREngineError
+from app.pipeline.classifier import classify_document
+from app.pipeline.preprocessing import BASE_TMP_DIR
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
+from app.services.gemini import gemini_service, GeminiServiceError, GeminiNotConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -302,4 +314,379 @@ async def preprocess_document_endpoint(document_id: str) -> PreprocessingResult:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Preprocessing failed: {str(err)}"
+        )
+
+
+@router.post("/{document_id}/ocr", response_model=OCRDocumentResult)
+async def ocr_document_endpoint(document_id: str) -> OCRDocumentResult:
+    """
+    Execute OCR extraction stage:
+    1. Validate document existence in PostgreSQL.
+    2. Verify OCR-ready preprocessed page images exist.
+    3. Check OCR engine availability (Tesseract).
+    4. Transition status to 'ocr' and record start audit log.
+    5. Execute layout-aware OCR extraction across all pages.
+    6. Persist structured result artifact to backend/tmp/processing/{document_id}/ocr.json.
+    7. Update status to 'ocr_completed' and record completion log.
+    8. Return complete OCRDocumentResult.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    # 1. Validate document existence
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    # 2. Verify preprocessing output exists
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    if not os.path.exists(target_dir):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be preprocessed before OCR."
+        )
+
+    page_files = sorted(glob.glob(os.path.join(target_dir, "page_*.png")))
+    if not page_files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be preprocessed before OCR. No page images found."
+        )
+
+    # Load OCR-ready pages
+    pages: List[PreprocessedPage] = []
+    for idx, p_path in enumerate(page_files):
+        match = re.search(r"page_(\d+)\.png", os.path.basename(p_path))
+        page_num = int(match.group(1)) if match else (idx + 1)
+        try:
+            with Image.open(p_path) as p_img:
+                w, h = p_img.size
+        except Exception:
+            w, h = 0, 0
+
+        pages.append(
+            PreprocessedPage(
+                page_number=page_num,
+                image_path=p_path,
+                width=w,
+                height=h,
+                format="png",
+                file_size_bytes=os.path.getsize(p_path) if os.path.exists(p_path) else None,
+            )
+        )
+
+    # 3. Check OCR engine availability
+    engine = get_ocr_engine()
+    available, error_msg = engine.is_available()
+    if not available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=error_msg or "OCR engine is not available. Please configure TESSERACT_CMD."
+        )
+
+    # 4. Update status to 'ocr' and record audit log
+    try:
+        supabase_service.update_document_status(document_id, "ocr")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="ocr",
+            status="started",
+            message="OCR extraction started",
+            metadata={"page_count": len(pages)}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record OCR started log for {document_id}: {log_err}")
+
+    # 5. Run OCR extraction
+    try:
+        ocr_result = engine.extract_document(document_id=document_id, pages=pages)
+    except OCREngineUnavailableError as unavail_err:
+        logger.error(f"OCR engine unavailable during processing of {document_id}: {unavail_err}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="ocr",
+                status="failed",
+                message=str(unavail_err)
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(unavail_err)
+        )
+    except Exception as proc_err:
+        err_msg = f"OCR processing failed: {str(proc_err)}"
+        logger.error(f"OCR execution error for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="ocr",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=err_msg
+        )
+
+    # 6. Save structured OCR JSON artifact
+    ocr_json_path = os.path.join(target_dir, "ocr.json")
+    try:
+        with open(ocr_json_path, "w", encoding="utf-8") as f:
+            f.write(ocr_result.model_dump_json(indent=2))
+    except Exception as save_err:
+        logger.warning(f"Failed to write ocr.json artifact for {document_id}: {save_err}")
+
+    # 7. Update status to 'ocr_completed' & record completion log
+    try:
+        supabase_service.update_document_status(document_id, "ocr_completed")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="ocr",
+            status="completed",
+            message="OCR extraction completed successfully",
+            metadata={
+                "page_count": ocr_result.page_count,
+                "block_count": ocr_result.metadata.block_count,
+                "average_confidence": ocr_result.metadata.average_confidence,
+                "processing_duration_ms": ocr_result.metadata.processing_duration_ms,
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record OCR completion log for {document_id}: {log_err}")
+
+    return ocr_result
+
+
+@router.get("/{document_id}/ocr", response_model=OCRDocumentResult)
+async def get_document_ocr_endpoint(document_id: str) -> OCRDocumentResult:
+    """
+    Retrieve structured OCR result artifact for an existing document if already processed.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    ocr_json_path = os.path.join(target_dir, "ocr.json")
+
+    if not os.path.isfile(ocr_json_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"OCR result not found for document '{document_id}'. Run POST /api/documents/{document_id}/ocr first."
+        )
+
+    try:
+        with open(ocr_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return OCRDocumentResult.model_validate(data)
+    except Exception as err:
+        logger.error(f"Failed to read ocr.json for {document_id}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse stored OCR result: {str(err)}"
+        )
+
+
+@router.post("/{document_id}/classify", response_model=DocumentClassificationResult)
+async def classify_document_endpoint(document_id: str) -> DocumentClassificationResult:
+    """
+    Execute document classification stage:
+    1. Validate document exists in PostgreSQL database.
+    2. Verify OCR output artifact (ocr.json) exists.
+    3. Verify Gemini API service configuration.
+    4. Transition status to 'classified' and record start audit log.
+    5. Execute semantic classification via Gemini using structured OCR input.
+    6. Persist classification result artifact to backend/tmp/processing/{document_id}/classification.json.
+    7. Update documents.document_type and documents.status in PostgreSQL.
+    8. Record completion audit log with metrics.
+    9. Return DocumentClassificationResult.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    # 1. Validate document existence
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    # 2. Verify OCR has been completed
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    ocr_json_path = os.path.join(target_dir, "ocr.json")
+
+    if not os.path.isfile(ocr_json_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be processed with OCR before classification."
+        )
+
+    try:
+        with open(ocr_json_path, "r", encoding="utf-8") as f:
+            ocr_data = json.load(f)
+        ocr_result = OCRDocumentResult.model_validate(ocr_data)
+    except Exception as read_err:
+        logger.error(f"Failed to load OCR result for {document_id}: {read_err}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stored OCR result is invalid or corrupted. Please re-run OCR."
+        )
+
+    # 3. Check Gemini configuration
+    if not gemini_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini API key is not configured. Please set GEMINI_API_KEY in backend/.env."
+        )
+
+    # 4. Record audit start log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="classification",
+            status="started",
+            message="Document classification started",
+            metadata={"page_count": ocr_result.page_count}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record classification start log for {document_id}: {log_err}")
+
+    # 5. Execute classification
+    try:
+        classification_res = classify_document(ocr_result)
+    except GeminiNotConfiguredError as cfg_err:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(cfg_err)
+        )
+    except GeminiServiceError as gem_err:
+        err_msg = f"AI classification failed: {str(gem_err)}"
+        logger.error(f"Gemini classification error for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="classification",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=err_msg
+        )
+    except Exception as general_err:
+        err_msg = f"Classification processing error: {str(general_err)}"
+        logger.error(f"Unexpected error classifying {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="classification",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during classification. Please check server logs."
+        )
+
+    # 6. Save classification JSON artifact
+    classification_json_path = os.path.join(target_dir, "classification.json")
+    try:
+        with open(classification_json_path, "w", encoding="utf-8") as f:
+            f.write(classification_res.model_dump_json(indent=2))
+    except Exception as save_err:
+        logger.warning(f"Failed to write classification.json for {document_id}: {save_err}")
+
+    # 7. Update documents table in PostgreSQL: document_type & status='classified'
+    try:
+        supabase_service.update_document_status(
+            document_id=document_id,
+            status="classified",
+            document_type=classification_res.document_type.value
+        )
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="classification",
+            status="completed",
+            message="Document classification completed successfully",
+            metadata={
+                "document_type": classification_res.document_type.value,
+                "confidence": classification_res.confidence,
+                "ocr_average_confidence": classification_res.ocr_average_confidence,
+                "confidence_threshold": classification_res.metadata.get("confidence_threshold"),
+                "below_threshold": classification_res.metadata.get("below_threshold"),
+            }
+        )
+    except Exception as db_err:
+        logger.warning(f"Failed to persist classification status to DB for {document_id}: {db_err}")
+
+    return classification_res
+
+
+@router.get("/{document_id}/classification", response_model=DocumentClassificationResult)
+async def get_document_classification_endpoint(document_id: str) -> DocumentClassificationResult:
+    """
+    Retrieve stored classification result artifact for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    classification_json_path = os.path.join(target_dir, "classification.json")
+
+    if not os.path.isfile(classification_json_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Classification result not found for document '{document_id}'. Run POST /api/documents/{document_id}/classify first."
+        )
+
+    try:
+        with open(classification_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return DocumentClassificationResult.model_validate(data)
+    except Exception as err:
+        logger.error(f"Failed to read classification.json for {document_id}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse stored classification result: {str(err)}"
         )

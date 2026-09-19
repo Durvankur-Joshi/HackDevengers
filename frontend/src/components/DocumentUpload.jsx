@@ -14,7 +14,13 @@ import {
   Loader2,
   FileCheck,
   Layers,
-  Sparkles
+  Sparkles,
+  ScanText,
+  Tag,
+  Brain,
+  FileSpreadsheet,
+  UserCheck,
+  HelpCircle,
 } from 'lucide-react';
 
 const MAX_FILE_SIZE_MB = 10;
@@ -50,6 +56,12 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [uploadedDoc, setUploadedDoc] = useState(null);
   const [preprocessing, setPreprocessing] = useState(false);
   const [preprocessResult, setPreprocessResult] = useState(null);
+  const [runningOcr, setRunningOcr] = useState(false);
+  const [ocrProgressText, setOcrProgressText] = useState('');
+  const [ocrResult, setOcrResult] = useState(null);
+  const [viewMode, setViewMode] = useState('full');
+  const [classifying, setClassifying] = useState(false);
+  const [classificationResult, setClassificationResult] = useState(null);
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
@@ -152,10 +164,73 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
+  const handleRunOcr = async () => {
+    if (!uploadedDoc?.id) return;
+
+    setRunningOcr(true);
+    setError(null);
+    setOcrProgressText('Running OCR...');
+
+    const totalPages = preprocessResult?.page_count || 1;
+    let pageTimer = null;
+    if (totalPages > 1) {
+      let page = 1;
+      pageTimer = setInterval(() => {
+        if (page <= totalPages) {
+          setOcrProgressText(`Processing page ${page} of ${totalPages}...`);
+          page += 1;
+        }
+      }, 750);
+    }
+
+    const result = await api.runOcr(uploadedDoc.id);
+
+    if (pageTimer) clearInterval(pageTimer);
+    setRunningOcr(false);
+    setOcrProgressText('');
+
+    if (result.ok && result.data) {
+      setOcrResult(result.data);
+      setUploadedDoc((prev) => ({
+        ...prev,
+        status: 'ocr_completed',
+      }));
+    } else {
+      setError(result.error || 'OCR extraction failed. Please try again.');
+    }
+  };
+
+  const handleClassify = async () => {
+    if (!uploadedDoc?.id) return;
+
+    setClassifying(true);
+    setError(null);
+
+    const result = await api.classifyDocument(uploadedDoc.id);
+
+    setClassifying(false);
+
+    if (result.ok && result.data) {
+      setClassificationResult(result.data);
+      setUploadedDoc((prev) => ({
+        ...prev,
+        status: 'classified',
+        document_type: result.data.document_type,
+      }));
+    } else {
+      setError(result.error || 'Classification failed. Please check Gemini API configuration.');
+    }
+  };
+
   const handleReset = () => {
     setSelectedFile(null);
     setUploadedDoc(null);
     setPreprocessResult(null);
+    setOcrResult(null);
+    setClassificationResult(null);
+    setRunningOcr(false);
+    setClassifying(false);
+    setOcrProgressText('');
     setError(null);
     if (inputRef.current) {
       inputRef.current.value = '';
@@ -188,6 +263,27 @@ export default function DocumentUpload({ onUploadSuccess }) {
           </div>
         )}
 
+        {/* Pipeline Step Progress Indicator */}
+        {uploadedDoc && (
+          <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 px-3.5 py-2 text-[11px] font-mono">
+            <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Upload
+            </div>
+            <span className="text-muted-foreground/60">→</span>
+            <div className={`flex items-center gap-1.5 ${preprocessResult ? 'text-emerald-400 font-semibold' : 'text-muted-foreground'}`}>
+              {preprocessResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />} Preprocess
+            </div>
+            <span className="text-muted-foreground/60">→</span>
+            <div className={`flex items-center gap-1.5 ${ocrResult ? 'text-emerald-400 font-semibold' : (preprocessResult ? 'text-blue-400 font-semibold' : 'text-muted-foreground')}`}>
+              {ocrResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${preprocessResult ? 'bg-blue-400' : 'bg-slate-600'}`} />} OCR
+            </div>
+            <span className="text-muted-foreground/60">→</span>
+            <div className={`flex items-center gap-1.5 ${classificationResult ? 'text-emerald-400 font-semibold' : (ocrResult ? 'text-purple-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
+              {classificationResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${ocrResult ? 'bg-purple-400' : 'bg-slate-600'}`} />} Classify
+            </div>
+          </div>
+        )}
+
         {/* State 1: Upload Success Result Card */}
         {uploadedDoc ? (
           <div className="space-y-4">
@@ -201,7 +297,15 @@ export default function DocumentUpload({ onUploadSuccess }) {
                 </span>
               </div>
               <Badge
-                variant={uploadedDoc.status === "preprocessed" ? "success" : "default"}
+                variant={
+                  uploadedDoc.status === "classified"
+                    ? "default"
+                    : uploadedDoc.status === "ocr_completed"
+                      ? "success"
+                      : uploadedDoc.status === "preprocessed"
+                        ? "secondary"
+                        : "outline"
+                }
                 className="capitalize text-xs font-mono"
               >
                 Status: {uploadedDoc.status || "uploaded"}
@@ -232,7 +336,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
               </div>
 
               {/* Preprocessed Details Badge / Banner */}
-              {preprocessResult && (
+              {preprocessResult && !ocrResult && (
                 <div className="rounded-lg border border-indigo-500/20 bg-indigo-950/20 p-2.5 text-[11px] font-mono text-muted-foreground space-y-1.5">
                   <div className="flex items-center justify-between text-indigo-300 font-semibold">
                     <span className="flex items-center gap-1.5">
@@ -250,6 +354,147 @@ export default function DocumentUpload({ onUploadSuccess }) {
                     <span>Processing Duration:</span>
                     <span className="text-slate-200">{preprocessResult.metadata?.processing_duration_ms} ms</span>
                   </div>
+                </div>
+              )}
+
+              {/* OCR Results Panel */}
+              {ocrResult && (
+                <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 p-3 text-xs font-mono space-y-2.5">
+                  <div className="flex items-center justify-between text-blue-300 font-semibold border-b border-blue-500/20 pb-2">
+                    <span className="flex items-center gap-1.5 text-emerald-400">
+                      <CheckCircle2 className="h-4 w-4" /> OCR Completed
+                    </span>
+                    <span className="text-[11px] text-blue-300 font-mono">
+                      Engine: {ocrResult.metadata?.ocr_engine || 'Tesseract'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 py-0.5 text-center">
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Pages</div>
+                      <div className="text-sm font-bold text-white">{ocrResult.page_count}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Text Blocks</div>
+                      <div className="text-sm font-bold text-white">{ocrResult.metadata?.block_count ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Avg Confidence</div>
+                      <div className="text-sm font-bold text-emerald-400">
+                        {ocrResult.metadata?.average_confidence != null
+                          ? `${ocrResult.metadata.average_confidence}%`
+                          : 'N/A'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Extracted Text Preview */}
+                  <div className="pt-2 border-t border-border/40 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-200">Extracted Text</span>
+                      <div className="flex items-center gap-1 bg-background/80 p-0.5 rounded border border-border/40 text-[10px]">
+                        <button
+                          type="button"
+                          onClick={() => setViewMode('full')}
+                          className={`px-2 py-0.5 rounded ${viewMode === 'full' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                        >
+                          Full Text
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setViewMode('blocks')}
+                          className={`px-2 py-0.5 rounded ${viewMode === 'blocks' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                        >
+                          Blocks ({ocrResult.metadata?.block_count ?? 0})
+                        </button>
+                      </div>
+                    </div>
+
+                    {viewMode === 'full' ? (
+                      <div className="max-h-48 overflow-y-auto rounded-md bg-background/80 p-2.5 text-[11px] font-mono text-slate-300 whitespace-pre-wrap leading-relaxed border border-border/40 select-text">
+                        {ocrResult.full_text || 'No readable text detected.'}
+                      </div>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                        {ocrResult.pages?.flatMap((p) => p.blocks || []).slice(0, 50).map((b, idx) => (
+                          <div key={idx} className="rounded bg-background/70 p-2 border border-border/40 flex items-start justify-between gap-2 text-[11px]">
+                            <div className="truncate text-slate-200 font-mono flex-1">
+                              <span className="text-muted-foreground mr-1.5">#{b.block_index}</span>
+                              {b.text}
+                            </div>
+                            <div className="shrink-0 flex items-center gap-1.5 text-[10px] font-mono">
+                              <span className="text-muted-foreground">P{b.page_number}</span>
+                              <span className="text-muted-foreground">[{b.bbox.x},{b.bbox.y}]</span>
+                              <span className={b.confidence != null && b.confidence >= 80 ? 'text-emerald-400' : 'text-amber-400'}>
+                                {b.confidence != null ? `${b.confidence}%` : 'N/A'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Classification Results Panel */}
+              {classificationResult && (
+                <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3.5 text-xs font-mono space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-purple-500/20 pb-2">
+                    <div className="flex items-center gap-2 text-purple-300 font-semibold">
+                      <Brain className="h-4 w-4 text-purple-400" />
+                      <span>Document Classification</span>
+                    </div>
+                    <Badge
+                      variant={
+                        classificationResult.document_type === "invoice"
+                          ? "default"
+                          : classificationResult.document_type === "onboarding_form"
+                            ? "success"
+                            : "warning"
+                      }
+                      className="capitalize text-xs font-mono px-2 py-0.5"
+                    >
+                      {classificationResult.document_type === "invoice" && "Invoice"}
+                      {classificationResult.document_type === "onboarding_form" && "Onboarding Form"}
+                      {classificationResult.document_type === "unknown" && "Unknown"}
+                    </Badge>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Document Archetype</div>
+                      <div className="text-sm font-bold capitalize text-white">
+                        {classificationResult.document_type.replace("_", " ")}
+                      </div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">AI Confidence</div>
+                      <div className="text-sm font-bold text-purple-300">
+                        {Math.round(classificationResult.confidence * 100)}%
+                      </div>
+                    </div>
+                  </div>
+
+                  {classificationResult.evidence?.length > 0 && (
+                    <div className="pt-2 border-t border-border/40 space-y-1">
+                      <div className="text-[11px] font-semibold text-slate-200">Classification Evidence:</div>
+                      <ul className="space-y-1">
+                        {classificationResult.evidence.map((ev, i) => (
+                          <li key={i} className="flex items-start gap-1.5 text-slate-300 text-[11px]">
+                            <span className="text-purple-400 font-bold">•</span>
+                            <span>{ev}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {classificationResult.document_type === "unknown" && (
+                    <div className="rounded bg-amber-500/10 border border-amber-500/20 p-2 text-[10px] text-amber-300 leading-relaxed">
+                      Document does not match supported archetypes (Invoice or Onboarding Form). It will be flagged for manual review or secondary routing.
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -298,7 +543,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   </Button>
                 )}
 
-                {uploadedDoc.status !== "preprocessed" ? (
+                {uploadedDoc.status !== "preprocessed" && uploadedDoc.status !== "ocr_completed" && uploadedDoc.status !== "classified" && !preprocessResult ? (
                   <Button
                     size="sm"
                     onClick={handlePreprocess}
@@ -317,10 +562,48 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       </>
                     )}
                   </Button>
+                ) : !ocrResult ? (
+                  <Button
+                    size="sm"
+                    onClick={handleRunOcr}
+                    disabled={runningOcr}
+                    className="text-xs gap-1.5 bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/20"
+                  >
+                    {runningOcr ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {ocrProgressText || "Running OCR..."}
+                      </>
+                    ) : (
+                      <>
+                        <ScanText className="h-3.5 w-3.5" />
+                        Run OCR
+                      </>
+                    )}
+                  </Button>
+                ) : !classificationResult ? (
+                  <Button
+                    size="sm"
+                    onClick={handleClassify}
+                    disabled={classifying}
+                    className="text-xs gap-1.5 bg-purple-600 hover:bg-purple-500 text-white shadow-md shadow-purple-500/20"
+                  >
+                    {classifying ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Classifying document...
+                      </>
+                    ) : (
+                      <>
+                        <Tag className="h-3.5 w-3.5" />
+                        Classify Document
+                      </>
+                    )}
+                  </Button>
                 ) : (
-                  <Badge variant="success" className="text-xs gap-1 py-1 px-2.5">
-                    <Sparkles className="h-3 w-3" />
-                    OCR-Ready
+                  <Badge variant="default" className="text-xs gap-1 py-1 px-2.5 bg-purple-600/20 border-purple-500/40 text-purple-300">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-purple-400" />
+                    Classified
                   </Badge>
                 )}
               </div>
@@ -335,11 +618,10 @@ export default function DocumentUpload({ onUploadSuccess }) {
               onDragOver={handleDrag}
               onDrop={handleDrop}
               onClick={() => inputRef.current?.click()}
-              className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${
-                dragActive
-                  ? 'border-primary bg-primary/10 scale-[1.01]'
-                  : 'border-border/60 hover:border-primary/50 hover:bg-card/50'
-              }`}
+              className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${dragActive
+                ? 'border-primary bg-primary/10 scale-[1.01]'
+                : 'border-border/60 hover:border-primary/50 hover:bg-card/50'
+                }`}
             >
               <input
                 ref={inputRef}

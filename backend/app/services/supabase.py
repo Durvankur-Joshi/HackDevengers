@@ -114,9 +114,10 @@ class SupabaseService:
         self,
         document_id: str,
         status: str,
-        storage_path: Optional[str] = None
+        storage_path: Optional[str] = None,
+        document_type: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update the status and optional storage_path of an existing document."""
+        """Update the status, optional storage_path, and optional document_type of an existing document."""
         client = self.get_client()
         if not client:
             raise RuntimeError("Supabase client is not configured.")
@@ -124,11 +125,25 @@ class SupabaseService:
         payload = {"status": status}
         if storage_path:
             payload["storage_path"] = storage_path
+        if document_type:
+            payload["document_type"] = document_type
 
-        res = client.table("documents").update(payload).eq("id", document_id).execute()
-        if res.data and len(res.data) > 0:
-            return res.data[0]
-        return None
+        try:
+            res = client.table("documents").update(payload).eq("id", document_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+            return None
+        except Exception as e:
+            # If 'ocr_completed' was rejected by an un-migrated DB check constraint, fallback to 'ocr'
+            if status == "ocr_completed":
+                logger.warning(f"Status 'ocr_completed' rejected ({e}); falling back to 'ocr'")
+                try:
+                    res = client.table("documents").update({"status": "ocr"}).eq("id", document_id).execute()
+                    if res.data and len(res.data) > 0:
+                        return res.data[0]
+                except Exception:
+                    pass
+            raise e
 
     def create_processing_log(
         self,

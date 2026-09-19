@@ -147,6 +147,8 @@ export class ApiService {
 
   /**
    * Trigger document preprocessing stage (converts pages to OCR-ready format)
+  /**
+   * Trigger document preprocessing stage (converts pages to OCR-ready format)
    * @param {string} documentId
    */
   async preprocessDocument(documentId) {
@@ -162,6 +164,86 @@ export class ApiService {
       return { ok: true, data };
     } catch (err) {
       return { ok: false, error: err.message || 'Network error during preprocessing.' };
+    }
+  }
+
+  /**
+   * Execute layout-aware OCR extraction stage
+   * @param {string} documentId
+   */
+  async runOcr(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/ocr`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'OCR extraction failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during OCR extraction.' };
+    }
+  }
+
+  /**
+   * Fetch structured OCR result artifact for an existing document
+   * @param {string} documentId
+   */
+  async getOcr(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/ocr`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load OCR results.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving OCR results.' };
+    }
+  }
+
+  /**
+   * Execute semantic document classification stage via Gemini
+   * @param {string} documentId
+   */
+  async classifyDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/classify`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Classification failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during document classification.' };
+    }
+  }
+
+  /**
+   * Retrieve cached classification result for an existing document
+   * @param {string} documentId
+   */
+  async getClassification(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/classification`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load classification.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving classification.' };
     }
   }
 }
