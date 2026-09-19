@@ -103,4 +103,31 @@ class StorageService:
             return False
 
 
+    def download_file(
+        self,
+        storage_path: str,
+        bucket_name: Optional[str] = None
+    ) -> bytes:
+        """
+        Download original binary document from Supabase Storage.
+        Returns bytes.
+        """
+        client = supabase_service.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured or unavailable.")
+
+        target_bucket = bucket_name or self.default_bucket
+
+        try:
+            res = client.storage.from_(target_bucket).download(storage_path)
+            if isinstance(res, bytes):
+                return res
+            elif hasattr(res, "read"):
+                return res.read()
+            return bytes(res)
+        except Exception as e:
+            logger.error(f"Failed to download file from Supabase Storage '{storage_path}': {e}")
+            raise RuntimeError(f"Storage download failed for '{storage_path}': {str(e)}")
+
+
 storage_service = StorageService()

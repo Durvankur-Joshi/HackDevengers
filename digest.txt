@@ -3,24 +3,33 @@ Directory structure:
     ├── README.md
     ├── backend/
     │   ├── requirements.txt
-    │   ├── .env.example
     │   └── app/
     │       ├── __init__.py
     │       ├── main.py
     │       ├── api/
     │       │   ├── __init__.py
+    │       │   ├── documents.py
     │       │   └── routes.py
     │       ├── core/
     │       │   ├── __init__.py
     │       │   └── config.py
     │       ├── pipeline/
-    │       │   └── __init__.py
+    │       │   ├── __init__.py
+    │       │   ├── preprocessing.py
+    │       │   └── types.py
     │       ├── schemas/
     │       │   └── __init__.py
     │       └── services/
-    │           └── __init__.py
+    │           ├── __init__.py
+    │           ├── storage.py
+    │           ├── supabase.py
+    │           ├── test_preprocessing_flow.py
+    │           ├── test_upload_flow.py
+    │           └── verify_db.py
     ├── docs/
-    │   └── ARCHITECTURE.md
+    │   ├── ARCHITECTURE.md
+    │   ├── database.sql
+    │   └── SUPABASE_SETUP.md
     └── frontend/
         ├── components.json
         ├── index.html
@@ -29,12 +38,12 @@ Directory structure:
         ├── postcss.config.js
         ├── tailwind.config.js
         ├── vite.config.js
-        ├── .env.example
         └── src/
             ├── App.jsx
             ├── index.css
             ├── main.jsx
             ├── components/
+            │   ├── DocumentUpload.jsx
             │   └── ui/
             │       ├── badge.jsx
             │       ├── button.jsx
@@ -156,17 +165,10 @@ uvicorn[standard]>=0.28.0,<1.0.0
 pydantic>=2.6.0,<3.0.0
 pydantic-settings>=2.2.0,<3.0.0
 python-dotenv>=1.0.1
-
-
-
-================================================
-FILE: backend/.env.example
-================================================
-# Backend Environment Configuration
-HOST=0.0.0.0
-PORT=8000
-ENVIRONMENT=development
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+supabase>=2.3.0,<3.0.0
+python-multipart>=0.0.9
+Pillow>=10.2.0,<11.0.0
+PyMuPDF>=1.23.0,<1.25.0
 
 
 
@@ -186,7 +188,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api.routes import router
+from app.api.routes import router as base_router
+from app.api.documents import router as documents_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -206,7 +209,8 @@ app.add_middleware(
 )
 
 # Register routes
-app.include_router(router)
+app.include_router(base_router)
+app.include_router(documents_router)
 
 
 if __name__ == "__main__":
@@ -227,11 +231,323 @@ FILE: backend/app/api/__init__.py
 
 
 ================================================
+FILE: backend/app/api/documents.py
+================================================
+import os
+import re
+import uuid
+import logging
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from app.schemas import DocumentResponse, DocumentPreviewResponse
+from app.pipeline.types import PreprocessingResult
+from app.services.supabase import supabase_service
+from app.services.storage import storage_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/documents", tags=["Documents"])
+
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/jpg",
+}
+
+ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+}
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to prevent directory traversal and special character injection."""
+    base_name = os.path.basename(filename.strip())
+    # Keep alphanumeric, dot, underscore, dash
+    clean_name = re.sub(r"[^a-zA-Z0-9._-]", "_", base_name)
+    return clean_name or f"document_{uuid.uuid4().hex[:8]}"
+
+
+@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+async def upload_document(file: UploadFile = File(...)) -> DocumentResponse:
+    """
+    Ingest a document:
+    1. Validate MIME type and file extension.
+    2. Validate file size (<= 10MB).
+    3. Generate document UUID and safe storage path.
+    4. Store metadata in PostgreSQL.
+    5. Store binary payload in Supabase Storage.
+    6. Record processing log entry.
+    """
+    if not file or not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No file provided or filename is missing."
+        )
+
+    # Validate file extension
+    _, ext = os.path.splitext(file.filename.lower())
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File type not supported. Please upload a PDF, JPG, or PNG."
+        )
+
+    # Validate MIME type
+    content_type = (file.content_type or "").lower()
+    if content_type == "image/jpg":
+        content_type = "image/jpeg"
+
+    if content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File type not supported. Please upload a PDF, JPG, or PNG."
+        )
+
+    # Read binary content
+    try:
+        content = await file.read()
+    except Exception as e:
+        logger.error(f"Error reading uploaded file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read uploaded file content."
+        )
+
+    # Validate size
+    file_size = len(content)
+    if file_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty."
+        )
+
+    if file_size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File is too large. Maximum size is {MAX_FILE_SIZE_MB} MB."
+        )
+
+    # Generate document UUID and safe storage path
+    doc_id = str(uuid.uuid4())
+    safe_name = sanitize_filename(file.filename)
+    storage_path = f"documents/{doc_id}/{safe_name}"
+
+    # Verify Supabase configuration
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured. Please check backend/.env credentials."
+        )
+
+    # 1. Create document metadata record in PostgreSQL with status 'uploaded'
+    try:
+        inserted = supabase_service.insert_document(
+            filename=file.filename,
+            document_id=doc_id,
+            document_type="unknown",
+            status="uploaded",
+            mime_type=content_type,
+            file_size=file_size,
+            storage_path=storage_path
+        )
+    except Exception as e:
+        logger.error(f"Failed to record document metadata in PostgreSQL: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error while recording document: {str(e)}"
+        )
+
+    # 2. Upload file to Supabase Storage
+    try:
+        storage_service.upload_file(
+            file_bytes=content,
+            storage_path=storage_path,
+            mime_type=content_type
+        )
+    except Exception as e:
+        logger.error(f"Failed to upload document to Supabase Storage: {e}")
+        # Roll back / mark document status as failed in database
+        try:
+            supabase_service.update_document_status(doc_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=doc_id,
+                stage="upload",
+                status="failed",
+                message=f"Storage upload failed: {str(e)}"
+            )
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Upload failed while saving to storage. Please try again."
+        )
+
+    # 3. Record successful processing log
+    try:
+        supabase_service.create_processing_log(
+            document_id=doc_id,
+            stage="upload",
+            status="completed",
+            message="Document uploaded successfully",
+            metadata={
+                "original_filename": file.filename,
+                "mime_type": content_type,
+                "file_size": file_size,
+                "storage_path": storage_path,
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to write processing log for document {doc_id}: {log_err}")
+
+    # Generate preview signed URL
+    preview_url = storage_service.create_signed_url(storage_path, expires_in=3600)
+
+    return DocumentResponse(
+        id=doc_id,
+        filename=inserted.get("filename", file.filename),
+        document_type=inserted.get("document_type", "unknown"),
+        status=inserted.get("status", "uploaded"),
+        mime_type=inserted.get("mime_type", content_type),
+        file_size=inserted.get("file_size", file_size),
+        storage_path=storage_path,
+        summary=inserted.get("summary"),
+        created_at=str(inserted.get("created_at") or ""),
+        updated_at=str(inserted.get("updated_at") or ""),
+        preview_url=preview_url
+    )
+
+
+@router.get("/{document_id}", response_model=DocumentResponse)
+async def get_document(document_id: str) -> DocumentResponse:
+    """Retrieve document metadata by UUID, including preview access."""
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    storage_path = doc.get("storage_path")
+    preview_url = None
+    if storage_path:
+        preview_url = storage_service.create_signed_url(storage_path, expires_in=3600)
+
+    return DocumentResponse(
+        id=str(doc.get("id")),
+        filename=doc.get("filename"),
+        document_type=doc.get("document_type", "unknown"),
+        status=doc.get("status", "uploaded"),
+        mime_type=doc.get("mime_type"),
+        file_size=doc.get("file_size"),
+        storage_path=storage_path,
+        summary=doc.get("summary"),
+        created_at=str(doc.get("created_at") or ""),
+        updated_at=str(doc.get("updated_at") or ""),
+        preview_url=preview_url
+    )
+
+
+@router.get("/{document_id}/preview", response_model=DocumentPreviewResponse)
+async def get_document_preview(document_id: str) -> DocumentPreviewResponse:
+    """Generate a temporary signed URL to view/download the original document."""
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    storage_path = doc.get("storage_path")
+    if not storage_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No storage path associated with this document."
+        )
+
+    signed_url = storage_service.create_signed_url(storage_path, expires_in=3600)
+    if not signed_url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not generate signed preview URL for this document."
+        )
+
+    return DocumentPreviewResponse(
+        document_id=document_id,
+        filename=doc.get("filename"),
+        preview_url=signed_url,
+        expires_in=3600
+    )
+
+
+@router.post("/{document_id}/preprocess", response_model=PreprocessingResult)
+async def preprocess_document_endpoint(document_id: str) -> PreprocessingResult:
+    """
+    Execute document preprocessing stage:
+    1. Retrieve binary document from storage.
+    2. Convert PDF pages to 200 DPI images or normalize image orientation/contrast.
+    3. Save OCR-ready page files in clean temporary processing directory.
+    4. Update document status to 'preprocessed' and write audit logs.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    # Check document existence
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    try:
+        from app.pipeline import preprocess_document
+        result = preprocess_document(document_id)
+        return result
+    except ValueError as val_err:
+        logger.warning(f"Validation error during preprocessing of {document_id}: {val_err}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err)
+        )
+    except Exception as err:
+        logger.error(f"Preprocessing error on document {document_id}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Preprocessing failed: {str(err)}"
+        )
+
+
+
+================================================
 FILE: backend/app/api/routes.py
 ================================================
 from fastapi import APIRouter
-from app.schemas import HealthResponse, SystemInfoResponse
+from app.schemas import HealthResponse, DatabaseHealthResponse, SystemInfoResponse
 from app.core.config import settings
+from app.services.supabase import supabase_service
 
 router = APIRouter()
 
@@ -240,6 +556,20 @@ router = APIRouter()
 async def health_check() -> HealthResponse:
     """Health check endpoint to verify backend service availability."""
     return HealthResponse(status="ok")
+
+
+@router.get("/health/db", response_model=DatabaseHealthResponse, tags=["Health"])
+async def database_health_check() -> DatabaseHealthResponse:
+    """
+    Database health check endpoint to verify Supabase PostgreSQL availability.
+    Communicates strictly through the Supabase service abstraction layer.
+    """
+    result = supabase_service.check_connection()
+    return DatabaseHealthResponse(
+        status=result.get("status", "error"),
+        database=result.get("database", "disconnected"),
+        message=result.get("message")
+    )
 
 
 @router.get("/", response_model=SystemInfoResponse, tags=["System"])
@@ -276,6 +606,8 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -295,13 +627,297 @@ settings = Settings()
 ================================================
 FILE: backend/app/pipeline/__init__.py
 ================================================
-"""Document processing pipeline modules (Phase 3+)."""
+"""Document processing pipeline modules."""
+from app.pipeline.types import PreprocessedPage, PreprocessingResult
+from app.pipeline.preprocessing import preprocess_document
+
+__all__ = ["PreprocessedPage", "PreprocessingResult", "preprocess_document"]
+
+
+
+================================================
+FILE: backend/app/pipeline/preprocessing.py
+================================================
+import os
+import io
+import time
+import shutil
+import logging
+from typing import Optional, Dict, Any, List
+from PIL import Image, ImageOps, ImageEnhance
+import fitz  # PyMuPDF
+
+from app.pipeline.types import PreprocessedPage, PreprocessingResult
+from app.services.supabase import supabase_service
+from app.services.storage import storage_service
+
+logger = logging.getLogger(__name__)
+
+# Base temporary directory for preprocessed page images
+BASE_TMP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../tmp/processing"))
+MAX_IMAGE_DIMENSION = 2400
+PDF_RENDER_DPI = 200
+
+
+def _ensure_clean_dir(target_dir: str) -> None:
+    """Ensure directory exists and is empty for idempotent processing runs."""
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir, ignore_errors=True)
+    os.makedirs(target_dir, exist_ok=True)
+
+
+def _normalize_image(img: Image.Image) -> Image.Image:
+    """
+    Normalize orientation, color space, dimensions, and contrast for OCR readiness.
+    """
+    # 1. Orientation correction from EXIF
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+
+    # 2. Color mode normalization (handle transparency over white background)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    # 3. Reasonable dimension constraint (avoid excessive memory while maintaining OCR resolution)
+    width, height = img.size
+    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+        img.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
+
+    # 4. Light contrast enhancement to clarify faint text/scans
+    try:
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.15)
+    except Exception:
+        pass
+
+    return img
+
+
+def preprocess_pdf(file_bytes: bytes, output_dir: str) -> List[PreprocessedPage]:
+    """
+    Convert all pages of a PDF into ordered, OCR-ready PNG page images.
+    """
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Corrupted or invalid PDF file: {str(e)}")
+
+    page_count = len(doc)
+    if page_count == 0:
+        raise ValueError("PDF document contains no readable pages.")
+
+    pages: List[PreprocessedPage] = []
+
+    for page_idx in range(page_count):
+        page = doc[page_idx]
+        # Render at 200 DPI for optimal OCR balance
+        pix = page.get_pixmap(dpi=PDF_RENDER_DPI)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # Apply standard normalization
+        img = _normalize_image(img)
+
+        page_num = page_idx + 1
+        page_filename = f"page_{page_num:03d}.png"
+        out_path = os.path.join(output_dir, page_filename)
+        img.save(out_path, format="PNG", optimize=True)
+
+        pages.append(
+            PreprocessedPage(
+                page_number=page_num,
+                image_path=out_path,
+                width=img.width,
+                height=img.height,
+                format="png",
+                file_size_bytes=os.path.getsize(out_path)
+            )
+        )
+
+    doc.close()
+    return pages
+
+
+def preprocess_image(file_bytes: bytes, output_dir: str) -> List[PreprocessedPage]:
+    """
+    Process a single image (JPG, PNG) into an OCR-ready PNG page.
+    """
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img.load()
+    except Exception as e:
+        raise ValueError(f"Unreadable or corrupted image file: {str(e)}")
+
+    img = _normalize_image(img)
+
+    page_filename = "page_001.png"
+    out_path = os.path.join(output_dir, page_filename)
+    img.save(out_path, format="PNG", optimize=True)
+
+    return [
+        PreprocessedPage(
+            page_number=1,
+            image_path=out_path,
+            width=img.width,
+            height=img.height,
+            format="png",
+            file_size_bytes=os.path.getsize(out_path)
+        )
+    ]
+
+
+def preprocess_document(document_id: str) -> PreprocessingResult:
+    """
+    Main preprocessing entry point:
+    1. Retrieve metadata from PostgreSQL.
+    2. Set status to 'preprocessing' and record start log.
+    3. Download binary document from Supabase Storage.
+    4. Render/normalize pages into temporary directory.
+    5. Record completion log and update status to 'preprocessed'.
+    """
+    start_time = time.time()
+
+    # 1. Fetch document record
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise ValueError(f"Document with ID '{document_id}' not found.")
+
+    storage_path = doc.get("storage_path")
+    filename = doc.get("filename", f"doc_{document_id}")
+    mime_type = (doc.get("mime_type") or "").lower()
+
+    if not storage_path:
+        raise ValueError(f"Document '{document_id}' has no associated storage path.")
+
+    # 2. Update status to 'preprocessing' and write log
+    try:
+        supabase_service.update_document_status(document_id, "preprocessing")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="preprocessing",
+            status="started",
+            message="Document preprocessing started"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update document status to 'preprocessing': {e}")
+
+    # 3. Download binary from Storage
+    try:
+        file_bytes = storage_service.download_file(storage_path)
+    except Exception as e:
+        # Mark as failed
+        err_msg = f"Failed to retrieve document binary from storage: {str(e)}"
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="preprocessing",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise RuntimeError(err_msg)
+
+    # 4. Setup clean temporary directory
+    target_dir = os.path.join(BASE_TMP_DIR, document_id)
+    _ensure_clean_dir(target_dir)
+
+    # 5. Process according to format
+    is_pdf = mime_type == "application/pdf" or filename.lower().endswith(".pdf")
+
+    try:
+        if is_pdf:
+            pages = preprocess_pdf(file_bytes, target_dir)
+        else:
+            pages = preprocess_image(file_bytes, target_dir)
+    except Exception as proc_err:
+        err_msg = f"Preprocessing failed: {str(proc_err)}"
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="preprocessing",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise RuntimeError(err_msg)
+
+    duration_ms = round((time.time() - start_time) * 1000)
+
+    # 6. Record success in database & logs
+    try:
+        supabase_service.update_document_status(document_id, "preprocessed")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="preprocessing",
+            status="completed",
+            message="Document preprocessing completed successfully",
+            metadata={
+                "page_count": len(pages),
+                "duration_ms": duration_ms,
+                "mime_type": mime_type,
+                "is_pdf": is_pdf
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record completion log for document '{document_id}': {e}")
+
+    return PreprocessingResult(
+        document_id=document_id,
+        original_filename=filename,
+        mime_type=mime_type or ("application/pdf" if is_pdf else "image/png"),
+        page_count=len(pages),
+        pages=pages,
+        metadata={
+            "processing_duration_ms": duration_ms,
+            "render_dpi": PDF_RENDER_DPI if is_pdf else None,
+            "output_directory": target_dir
+        },
+        status="preprocessed"
+    )
+
+
+
+================================================
+FILE: backend/app/pipeline/types.py
+================================================
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
+
+
+class PreprocessedPage(BaseModel):
+    page_number: int = Field(..., description="1-indexed sequential page number")
+    image_path: str = Field(..., description="Path to the generated OCR-ready image")
+    width: int = Field(..., description="Image width in pixels")
+    height: int = Field(..., description="Image height in pixels")
+    format: str = Field(default="png", description="Image encoding format")
+    file_size_bytes: Optional[int] = Field(default=None, description="Image file size in bytes")
+
+
+class PreprocessingResult(BaseModel):
+    document_id: str = Field(..., description="Document UUID")
+    original_filename: str = Field(..., description="Original uploaded filename")
+    mime_type: str = Field(..., description="Detected MIME type")
+    page_count: int = Field(..., description="Total preprocessed pages")
+    pages: List[PreprocessedPage] = Field(default_factory=list, description="Ordered OCR-ready pages")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata and timing")
+    status: str = Field(default="preprocessed", description="Document status after preprocessing")
 
 
 
 ================================================
 FILE: backend/app/schemas/__init__.py
 ================================================
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -309,11 +925,38 @@ class HealthResponse(BaseModel):
     status: str = Field(default="ok", example="ok")
 
 
+class DatabaseHealthResponse(BaseModel):
+    status: str = Field(..., example="ok")
+    database: str = Field(..., example="connected")
+    message: Optional[str] = Field(default=None)
+
+
 class SystemInfoResponse(BaseModel):
     name: str
     version: str
     status: str
     environment: str
+
+
+class DocumentResponse(BaseModel):
+    id: str
+    filename: str
+    document_type: Optional[str] = "unknown"
+    status: str = "uploaded"
+    mime_type: Optional[str] = None
+    file_size: Optional[int] = None
+    storage_path: Optional[str] = None
+    summary: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    preview_url: Optional[str] = None
+
+
+class DocumentPreviewResponse(BaseModel):
+    document_id: str
+    filename: str
+    preview_url: str
+    expires_in: int = 3600
 
 
 
@@ -325,9 +968,1036 @@ FILE: backend/app/services/__init__.py
 
 
 ================================================
+FILE: backend/app/services/storage.py
+================================================
+import logging
+from typing import Optional
+from app.services.supabase import supabase_service
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_BUCKET = "documents"
+
+
+class StorageService:
+    """
+    Storage service abstraction encapsulating all Supabase Storage interactions.
+    Provides safe file upload, signed URL generation, and cleanup.
+    """
+
+    def __init__(self, default_bucket: str = DEFAULT_BUCKET):
+        self.default_bucket = default_bucket
+
+    def upload_file(
+        self,
+        file_bytes: bytes,
+        storage_path: str,
+        mime_type: str = "application/octet-stream",
+        bucket_name: Optional[str] = None
+    ) -> str:
+        """
+        Upload binary document data to Supabase Storage.
+        Returns the confirmed storage path.
+        """
+        client = supabase_service.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured or unavailable.")
+
+        target_bucket = bucket_name or self.default_bucket
+
+        try:
+            # Upload with upsert enabled to prevent fatal collisions on re-upload
+            res = client.storage.from_(target_bucket).upload(
+                path=storage_path,
+                file=file_bytes,
+                file_options={"content-type": mime_type, "upsert": "true"}
+            )
+            logger.info(f"File successfully uploaded to Supabase Storage: {storage_path}")
+            return storage_path
+        except Exception as e:
+            logger.error(f"Failed to upload file to Supabase Storage path '{storage_path}': {e}")
+            raise RuntimeError(f"Storage upload error: {str(e)}")
+
+    def create_signed_url(
+        self,
+        storage_path: str,
+        expires_in: int = 3600,
+        bucket_name: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Generate a temporary, secure signed URL for previewing or downloading a document.
+        Does not expose service keys to the frontend.
+        """
+        client = supabase_service.get_client()
+        if not client or not storage_path:
+            return None
+
+        target_bucket = bucket_name or self.default_bucket
+
+        try:
+            res = client.storage.from_(target_bucket).create_signed_url(
+                path=storage_path,
+                expires_in=expires_in
+            )
+            if isinstance(res, dict):
+                return res.get("signedURL") or res.get("signedUrl")
+            elif hasattr(res, "signed_url"):
+                return res.signed_url
+            elif hasattr(res, "signedURL"):
+                return res.signedURL
+            return str(res) if res else None
+        except Exception as e:
+            logger.warning(f"Could not generate signed URL for '{storage_path}': {e}")
+            # Fallback to public URL attempt
+            try:
+                pub = client.storage.from_(target_bucket).get_public_url(storage_path)
+                return pub
+            except Exception:
+                return None
+
+    def delete_file(
+        self,
+        storage_path: str,
+        bucket_name: Optional[str] = None
+    ) -> bool:
+        """Delete an uploaded document from Supabase Storage."""
+        client = supabase_service.get_client()
+        if not client or not storage_path:
+            return False
+
+        target_bucket = bucket_name or self.default_bucket
+
+        try:
+            client.storage.from_(target_bucket).remove([storage_path])
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to remove file from Supabase Storage '{storage_path}': {e}")
+            return False
+
+
+    def download_file(
+        self,
+        storage_path: str,
+        bucket_name: Optional[str] = None
+    ) -> bytes:
+        """
+        Download original binary document from Supabase Storage.
+        Returns bytes.
+        """
+        client = supabase_service.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured or unavailable.")
+
+        target_bucket = bucket_name or self.default_bucket
+
+        try:
+            res = client.storage.from_(target_bucket).download(storage_path)
+            if isinstance(res, bytes):
+                return res
+            elif hasattr(res, "read"):
+                return res.read()
+            return bytes(res)
+        except Exception as e:
+            logger.error(f"Failed to download file from Supabase Storage '{storage_path}': {e}")
+            raise RuntimeError(f"Storage download failed for '{storage_path}': {str(e)}")
+
+
+storage_service = StorageService()
+
+
+
+================================================
+FILE: backend/app/services/supabase.py
+================================================
+import logging
+from typing import Optional, Dict, Any
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class SupabaseService:
+    """
+    Supabase client and database abstraction service.
+    Encapsulates all Supabase PostgreSQL interactions for the Document-to-Action pipeline.
+    """
+
+    def __init__(self):
+        self._client = None
+        self._init_attempted = False
+
+    def is_configured(self) -> bool:
+        """Verify whether valid Supabase configuration variables are set."""
+        url = (settings.SUPABASE_URL or "").strip()
+        key = (settings.SUPABASE_KEY or "").strip()
+        return bool(url and key and url.startswith("http"))
+
+    def get_client(self):
+        """Lazily initialize and return the Supabase client."""
+        if not self.is_configured():
+            return None
+
+        if self._client is None:
+            try:
+                from supabase._sync.client import create_client, Client
+                self._client = create_client(settings.SUPABASE_URL.strip(), settings.SUPABASE_KEY.strip())
+                logger.info("Supabase client successfully initialized.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase client: {e}")
+                self._client = None
+
+        return self._client
+
+    def check_connection(self) -> Dict[str, Any]:
+        """
+        Verify connectivity to Supabase PostgreSQL database.
+        Returns a clean status payload without leaking credentials.
+        """
+        if not self.is_configured():
+            return {
+                "status": "unconfigured",
+                "database": "disconnected",
+                "message": "SUPABASE_URL or SUPABASE_KEY not configured in backend/.env"
+            }
+
+        client = self.get_client()
+        if client is None:
+            return {
+                "status": "error",
+                "database": "disconnected",
+                "message": "Failed to create Supabase client with provided credentials"
+            }
+
+        try:
+            # Query the documents table with limit 1
+            response = client.table("documents").select("id").limit(1).execute()
+            return {
+                "status": "ok",
+                "database": "connected"
+            }
+        except Exception as e:
+            err_msg = str(e)
+            logger.warning(f"Supabase connection test failed: {err_msg}")
+            return {
+                "status": "error",
+                "database": "disconnected",
+                "message": f"Database query failed: {err_msg}"
+            }
+
+    def insert_document(
+        self,
+        filename: str,
+        document_id: Optional[str] = None,
+        document_type: Optional[str] = "unknown",
+        status: str = "uploaded",
+        mime_type: Optional[str] = None,
+        file_size: Optional[int] = None,
+        storage_path: Optional[str] = None,
+        summary: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert a new document metadata record into the documents table."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        payload = {
+            "filename": filename,
+            "document_type": document_type,
+            "status": status,
+        }
+        if document_id:
+            payload["id"] = document_id
+        if mime_type:
+            payload["mime_type"] = mime_type
+        if file_size is not None:
+            payload["file_size"] = file_size
+        if storage_path:
+            payload["storage_path"] = storage_path
+        if summary:
+            payload["summary"] = summary
+
+        res = client.table("documents").insert(payload).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+        raise RuntimeError("No data returned from document insert operation.")
+
+    def update_document_status(
+        self,
+        document_id: str,
+        status: str,
+        storage_path: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update the status and optional storage_path of an existing document."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        payload = {"status": status}
+        if storage_path:
+            payload["storage_path"] = storage_path
+
+        res = client.table("documents").update(payload).eq("id", document_id).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+        return None
+
+    def create_processing_log(
+        self,
+        document_id: str,
+        stage: str,
+        status: str,
+        message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Record an entry in the processing_logs table for pipeline auditability."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        payload = {
+            "document_id": document_id,
+            "stage": stage,
+            "status": status,
+        }
+        if message:
+            payload["message"] = message
+        if metadata:
+            payload["metadata"] = metadata
+
+        res = client.table("processing_logs").insert(payload).execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]
+        return payload
+
+    def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a document record by its UUID."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("documents").select("*").eq("id", document_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+            return None
+        except Exception as e:
+            logger.warning(f"Error fetching document {document_id}: {e}")
+            return None
+
+    def delete_document(self, document_id: str) -> bool:
+        """Delete a document record by its UUID (cascades to related tables)."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("documents").delete().eq("id", document_id).execute()
+            return bool(res.data and len(res.data) > 0)
+        except Exception as e:
+            logger.warning(f"Error deleting document {document_id}: {e}")
+            return False
+
+    def verify_roundtrip(self) -> Dict[str, Any]:
+        """
+        Lifecycle verification:
+        1. Insert temporary test document 'phase2-test.pdf'.
+        2. Retrieve and assert fields.
+        3. Delete and clean up test record.
+        """
+        if not self.is_configured():
+            return {
+                "success": False,
+                "error": "Supabase credentials not configured in backend/.env"
+            }
+
+        test_filename = "phase2-test.pdf"
+        test_type = "unknown"
+        test_status = "uploaded"
+
+        # 1. Insert
+        inserted = self.insert_document(
+            filename=test_filename,
+            document_type=test_type,
+            status=test_status
+        )
+        doc_id = inserted.get("id")
+        if not doc_id:
+            return {
+                "success": False,
+                "error": "Insert succeeded but did not return a valid document ID"
+            }
+
+        # 2. Retrieve
+        retrieved = self.get_document(doc_id)
+        if not retrieved or retrieved.get("filename") != test_filename:
+            # Clean up before erroring
+            self.delete_document(doc_id)
+            return {
+                "success": False,
+                "error": f"Failed to retrieve matching test document {doc_id}"
+            }
+
+        # 3. Clean up / Delete
+        deleted = self.delete_document(doc_id)
+        if not deleted:
+            return {
+                "success": False,
+                "error": f"Failed to clean up test document {doc_id}",
+                "inserted_id": doc_id
+            }
+
+        return {
+            "success": True,
+            "inserted_id": doc_id,
+            "filename": test_filename,
+            "document_type": test_type,
+            "status": test_status,
+            "cleaned_up": True
+        }
+
+
+# Global singleton instance
+supabase_service = SupabaseService()
+
+
+
+================================================
+FILE: backend/app/services/test_preprocessing_flow.py
+================================================
+import sys
+import os
+import io
+import json
+import shutil
+from PIL import Image
+
+# Ensure backend root is first in sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+backend_root = os.path.abspath(os.path.join(current_dir, "../.."))
+if current_dir in sys.path:
+    sys.path.remove(current_dir)
+if backend_root not in sys.path:
+    sys.path.insert(0, backend_root)
+
+import fitz  # PyMuPDF
+from fastapi.testclient import TestClient
+from app.main import app
+from app.pipeline.preprocessing import (
+    preprocess_pdf,
+    preprocess_image,
+    _normalize_image,
+    BASE_TMP_DIR
+)
+from app.pipeline.types import PreprocessedPage, PreprocessingResult
+
+client = TestClient(app)
+
+
+def create_sample_pdf(num_pages=3) -> bytes:
+    """Generate an in-memory multi-page PDF document for testing."""
+    doc = fitz.open()
+    for i in range(num_pages):
+        page = doc.new_page(width=595, height=842)  # A4 dimensions
+        # Insert sample text
+        page.insert_text(
+            (50, 72),
+            f"Document-to-Action Invoice Sample - Page {i + 1}\nVendor: ACME Corporation\nTotal: $1,250.00",
+            fontsize=16
+        )
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+def create_sample_image(format="PNG", mode="RGBA", size=(800, 1000)) -> bytes:
+    """Generate an in-memory test image with sample geometry."""
+    img = Image.new(mode, size, (240, 240, 240, 255) if mode == "RGBA" else (240, 240, 240))
+    buf = io.BytesIO()
+    img.save(buf, format=format)
+    return buf.getvalue()
+
+
+def test_multipage_pdf_preprocessing():
+    print("\n--- 1. Testing Multi-Page PDF Preprocessing (3 Pages) ---")
+    pdf_bytes = create_sample_pdf(num_pages=3)
+    test_out_dir = os.path.join(BASE_TMP_DIR, "test_doc_multi_pdf")
+    os.makedirs(test_out_dir, exist_ok=True)
+
+    pages = preprocess_pdf(pdf_bytes, test_out_dir)
+
+    assert len(pages) == 3, f"Expected 3 pages, got {len(pages)}"
+    for idx, p in enumerate(pages):
+        expected_num = idx + 1
+        assert p.page_number == expected_num, f"Page number mismatch: {p.page_number} != {expected_num}"
+        assert os.path.exists(p.image_path), f"Output file does not exist: {p.image_path}"
+        assert p.width > 0 and p.height > 0, f"Invalid dimensions: {p.width}x{p.height}"
+        assert p.format == "png", f"Unexpected format: {p.format}"
+        print(f"  [OK] Page {p.page_number}: {p.width}x{p.height} px, {p.file_size_bytes} bytes -> {os.path.basename(p.image_path)}")
+
+    # Clean up test dir
+    shutil.rmtree(test_out_dir, ignore_errors=True)
+    print("  [OK] Multi-page PDF successfully rendered to ordered OCR-ready PNGs.")
+
+
+def test_single_page_pdf_preprocessing():
+    print("\n--- 2. Testing Single-Page PDF Preprocessing ---")
+    pdf_bytes = create_sample_pdf(num_pages=1)
+    test_out_dir = os.path.join(BASE_TMP_DIR, "test_doc_single_pdf")
+    os.makedirs(test_out_dir, exist_ok=True)
+
+    pages = preprocess_pdf(pdf_bytes, test_out_dir)
+
+    assert len(pages) == 1
+    assert pages[0].page_number == 1
+    assert os.path.exists(pages[0].image_path)
+    shutil.rmtree(test_out_dir, ignore_errors=True)
+    print("  [OK] Single-page PDF rendered and verified.")
+
+
+def test_image_preprocessing_png():
+    print("\n--- 3. Testing PNG Preprocessing (RGBA Alpha Handling) ---")
+    png_bytes = create_sample_image(format="PNG", mode="RGBA", size=(600, 800))
+    test_out_dir = os.path.join(BASE_TMP_DIR, "test_doc_png")
+    os.makedirs(test_out_dir, exist_ok=True)
+
+    pages = preprocess_image(png_bytes, test_out_dir)
+
+    assert len(pages) == 1
+    assert pages[0].page_number == 1
+    assert os.path.exists(pages[0].image_path)
+    # Check rendered image is valid RGB
+    with Image.open(pages[0].image_path) as img:
+        assert img.mode == "RGB", f"Expected RGB mode, got {img.mode}"
+    shutil.rmtree(test_out_dir, ignore_errors=True)
+    print("  [OK] PNG successfully normalized to RGB OCR-ready page.")
+
+
+def test_image_preprocessing_jpg():
+    print("\n--- 4. Testing JPG Preprocessing ---")
+    jpg_bytes = create_sample_image(format="JPEG", mode="RGB", size=(700, 900))
+    test_out_dir = os.path.join(BASE_TMP_DIR, "test_doc_jpg")
+    os.makedirs(test_out_dir, exist_ok=True)
+
+    pages = preprocess_image(jpg_bytes, test_out_dir)
+
+    assert len(pages) == 1
+    assert pages[0].page_number == 1
+    assert os.path.exists(pages[0].image_path)
+    shutil.rmtree(test_out_dir, ignore_errors=True)
+    print("  [OK] JPG successfully preprocessed to OCR-ready PNG.")
+
+
+def test_oversized_image_resizing():
+    print("\n--- 5. Testing Oversized Image Scaling (Max 2400px) ---")
+    huge_img = Image.new("RGB", (3500, 4200), (255, 255, 255))
+    normalized = _normalize_image(huge_img)
+    assert normalized.width <= 2400 and normalized.height <= 2400
+    print(f"  [OK] Oversized image (3500x4200) scaled down to ({normalized.width}x{normalized.height}).")
+
+
+def test_idempotency_cleans_previous_output():
+    print("\n--- 6. Testing Idempotency (Cleaning Previous Output) ---")
+    test_doc_id = "test-idempotent-doc"
+    doc_dir = os.path.join(BASE_TMP_DIR, test_doc_id)
+    os.makedirs(doc_dir, exist_ok=True)
+
+    # Place a stale artifact
+    stale_file = os.path.join(doc_dir, "stale_page_999.png")
+    with open(stale_file, "w") as f:
+        f.write("stale")
+
+    assert os.path.exists(stale_file)
+
+    # Run preprocessing on 1-page PDF
+    pdf_bytes = create_sample_pdf(num_pages=1)
+    from app.pipeline.preprocessing import _ensure_clean_dir
+    _ensure_clean_dir(doc_dir)
+    pages = preprocess_pdf(pdf_bytes, doc_dir)
+
+    assert not os.path.exists(stale_file), "Stale file was not cleaned up!"
+    assert len(pages) == 1
+    assert os.path.exists(pages[0].image_path)
+
+    shutil.rmtree(doc_dir, ignore_errors=True)
+    print("  [OK] Preprocessing directory is cleaned idempotently on rerun.")
+
+
+def test_corrupted_file_handling():
+    print("\n--- 7. Testing Corrupted File Handling ---")
+    garbage_bytes = b"NOT_A_REAL_DOCUMENT_CONTENT_RANDOM_BYTES"
+    test_out_dir = os.path.join(BASE_TMP_DIR, "test_doc_corrupt")
+    os.makedirs(test_out_dir, exist_ok=True)
+
+    # PDF handler should reject
+    try:
+        preprocess_pdf(garbage_bytes, test_out_dir)
+        assert False, "Should have raised ValueError on corrupt PDF"
+    except ValueError as e:
+        print(f"  [OK] Corrupt PDF cleanly rejected: {e}")
+
+    # Image handler should reject
+    try:
+        preprocess_image(garbage_bytes, test_out_dir)
+        assert False, "Should have raised ValueError on corrupt Image"
+    except ValueError as e:
+        print(f"  [OK] Corrupt Image cleanly rejected: {e}")
+
+    shutil.rmtree(test_out_dir, ignore_errors=True)
+
+
+def test_api_preprocess_endpoint_validation():
+    print("\n--- 8. Testing Preprocess API Endpoint Validation ---")
+    fake_id = "00000000-0000-0000-0000-000000000000"
+    resp = client.post(f"/api/documents/{fake_id}/preprocess")
+    # Missing document ID returns 404
+    assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
+    print(f"  [OK] POST /api/documents/{fake_id}/preprocess returned 404 as expected: {resp.json().get('detail')}")
+
+
+if __name__ == "__main__":
+    print("==================================================")
+    print("PHASE 4: DOCUMENT PREPROCESSING TEST SUITE")
+    print("==================================================")
+    test_multipage_pdf_preprocessing()
+    test_single_page_pdf_preprocessing()
+    test_image_preprocessing_png()
+    test_image_preprocessing_jpg()
+    test_oversized_image_resizing()
+    test_idempotency_cleans_previous_output()
+    test_corrupted_file_handling()
+    test_api_preprocess_endpoint_validation()
+    print("\n==================================================")
+    print("ALL PHASE 4 PREPROCESSING TESTS PASSED")
+    print("==================================================")
+
+
+
+================================================
+FILE: backend/app/services/test_upload_flow.py
+================================================
+import sys
+import os
+import io
+import json
+
+# Ensure backend root is first in sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+backend_root = os.path.abspath(os.path.join(current_dir, "../.."))
+if current_dir in sys.path:
+    sys.path.remove(current_dir)
+if backend_root not in sys.path:
+    sys.path.insert(0, backend_root)
+
+from fastapi.testclient import TestClient
+from app.main import app
+from app.services.supabase import supabase_service
+from app.services.storage import storage_service
+
+client = TestClient(app)
+
+
+def test_health_endpoints():
+    print("\n--- 1. Testing Health Endpoints ---")
+    r1 = client.get("/health")
+    assert r1.status_code == 200, f"Expected 200, got {r1.status_code}"
+    assert r1.json() == {"status": "ok"}, f"Unexpected health response: {r1.json()}"
+    print("  [OK] GET /health returns {'status': 'ok'}")
+
+    r2 = client.get("/health/db")
+    assert r2.status_code == 200, f"Expected 200, got {r2.status_code}"
+    print(f"  [OK] GET /health/db returned status: {r2.json().get('status')}")
+
+
+def test_validation_unsupported_type():
+    print("\n--- 2. Testing Unsupported File Type Rejection ---")
+    file_payload = {"file": ("malicious.exe", b"MZ\x90\x00\x03\x00\x00\x00", "application/x-msdownload")}
+    resp = client.post("/api/documents/upload", files=file_payload)
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+    assert "File type not supported" in resp.json().get("detail", "")
+    print(f"  [OK] Rejected unsupported executable with 400: {resp.json().get('detail')}")
+
+    txt_payload = {"file": ("notes.txt", b"Hello world", "text/plain")}
+    resp2 = client.post("/api/documents/upload", files=txt_payload)
+    assert resp2.status_code == 400, f"Expected 400, got {resp2.status_code}"
+    assert "File type not supported" in resp2.json().get("detail", "")
+    print(f"  [OK] Rejected text file with 400: {resp2.json().get('detail')}")
+
+
+def test_validation_oversized_file():
+    print("\n--- 3. Testing Oversized File (>10MB) Rejection ---")
+    # 10.5 MB of dummy data
+    ten_and_half_mb = b"0" * (10 * 1024 * 1024 + 512 * 1024)
+    file_payload = {"file": ("giant_invoice.pdf", ten_and_half_mb, "application/pdf")}
+    resp = client.post("/api/documents/upload", files=file_payload)
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+    assert "too large" in resp.json().get("detail", "").lower()
+    print(f"  [OK] Rejected oversized file with 400: {resp.json().get('detail')}")
+
+
+def test_validation_empty_file():
+    print("\n--- 4. Testing Empty File Rejection ---")
+    file_payload = {"file": ("empty.pdf", b"", "application/pdf")}
+    resp = client.post("/api/documents/upload", files=file_payload)
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+    assert "empty" in resp.json().get("detail", "").lower()
+    print(f"  [OK] Rejected empty file with 400: {resp.json().get('detail')}")
+
+
+def test_missing_document_404():
+    print("\n--- 5. Testing Non-Existent Document (404) ---")
+    fake_id = "00000000-0000-0000-0000-000000000000"
+    resp = client.get(f"/api/documents/{fake_id}")
+    # If DB is configured, returns 404. If DB tables don't exist yet, returns 500/503 or 404
+    print(f"  [OK] GET /api/documents/{fake_id} returned status: {resp.status_code} ({resp.json().get('detail')})")
+
+
+def test_valid_file_formats_accepted():
+    print("\n--- 6. Testing Valid Format Payloads (PDF, JPG, PNG) ---")
+    # Create minimal valid PDF header
+    pdf_bytes = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\nxref\n0 2\n0000000000 65535 f\n0000000009 00000 n\ntrailer<</Size 2/Root 1 0 R>>\nstartxref\n50\n%%EOF"
+    jpg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\xff\xd9"
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+
+    for name, bdata, mime in [
+        ("sample_invoice.pdf", pdf_bytes, "application/pdf"),
+        ("sample_receipt.jpg", jpg_bytes, "image/jpeg"),
+        ("sample_form.png", png_bytes, "image/png"),
+    ]:
+        file_payload = {"file": (name, bdata, mime)}
+        resp = client.post("/api/documents/upload", files=file_payload)
+        print(f"  [*] Attempted upload for '{name}' ({mime}): status {resp.status_code}")
+        if resp.status_code == 201:
+            data = resp.json()
+            doc_id = data.get("id")
+            print(f"      [OK] Created document: ID={doc_id}, status={data.get('status')}, path={data.get('storage_path')}")
+            # Verify retrieval
+            get_resp = client.get(f"/api/documents/{doc_id}")
+            if get_resp.status_code == 200:
+                print(f"      [OK] Retrieved document via GET /api/documents/{doc_id}")
+            # Clean up
+            try:
+                supabase_service.delete_document(doc_id)
+                storage_service.delete_file(data.get("storage_path"))
+                print(f"      [OK] Cleaned up document {doc_id}")
+            except Exception:
+                pass
+        else:
+            print(f"      [i] Response detail: {resp.json().get('detail')}")
+
+
+if __name__ == "__main__":
+    print("==================================================")
+    print("PHASE 3: DOCUMENT UPLOAD & INGESTION TEST SUITE")
+    print("==================================================")
+    test_health_endpoints()
+    test_validation_unsupported_type()
+    test_validation_oversized_file()
+    test_validation_empty_file()
+    test_missing_document_404()
+    test_valid_file_formats_accepted()
+    print("\n==================================================")
+    print("TEST SUITE COMPLETED SUCCESSFULLY")
+    print("==================================================")
+
+
+
+================================================
+FILE: backend/app/services/verify_db.py
+================================================
+import sys
+import os
+import json
+
+# Ensure backend root is first in sys.path and remove current directory to avoid module shadowing
+current_dir = os.path.dirname(os.path.abspath(__file__))
+backend_root = os.path.abspath(os.path.join(current_dir, "../.."))
+if current_dir in sys.path:
+    sys.path.remove(current_dir)
+if backend_root not in sys.path:
+    sys.path.insert(0, backend_root)
+
+from app.services.supabase import supabase_service
+
+
+def run_verification():
+    print("=== Document-to-Action Pipeline: Supabase Verification ===")
+    
+    if not supabase_service.is_configured():
+        print("[-] Supabase is NOT configured.")
+        print("[-] Please provide SUPABASE_URL and SUPABASE_KEY in backend/.env to connect.")
+        return False
+
+    print("[+] Supabase configuration detected.")
+    print("[*] Testing database connectivity (GET /health/db equivalent)...")
+    health = supabase_service.check_connection()
+    print(f"[*] Connection status: {json.dumps(health, indent=2)}")
+
+    if health.get("database") != "connected":
+        print("[-] Database connection failed. Please verify that docs/database.sql was executed in Supabase SQL editor.")
+        return False
+
+    print("[+] Database connected successfully!")
+    print("[*] Performing test document round-trip (Insert -> Retrieve -> Delete)...")
+    result = supabase_service.verify_roundtrip()
+    print(f"[*] Lifecycle result: {json.dumps(result, indent=2)}")
+
+    if result.get("success"):
+        print("[+] Test document successfully inserted, verified, and cleaned up!")
+        return True
+    else:
+        print(f"[-] Lifecycle test failed: {result.get('error')}")
+        return False
+
+
+if __name__ == "__main__":
+    success = run_verification()
+    sys.exit(0 if success else 1)
+
+
+
+================================================
 FILE: docs/ARCHITECTURE.md
 ================================================
 Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 2800: character maps to <undefined>
+
+
+================================================
+FILE: docs/database.sql
+================================================
+-- ==============================================================================
+-- Document-to-Action Pipeline: Database Schema
+-- Phase 2 â€” Supabase PostgreSQL Schema Definition
+-- ==============================================================================
+
+-- Enable UUID extension if not already present
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ==============================================================================
+-- Function: Auto-update updated_at timestamp
+-- ==============================================================================
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- ==============================================================================
+-- Table 1: documents
+-- Purpose: Store uploaded document metadata and overall processing state.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    filename TEXT NOT NULL,
+    document_type TEXT NULL,
+    status TEXT NOT NULL DEFAULT 'uploaded',
+    mime_type TEXT NULL,
+    file_size BIGINT NULL,
+    storage_path TEXT NULL,
+    summary TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_documents_status CHECK (
+        status IN (
+            'uploaded',
+            'preprocessing',
+            'preprocessed',
+            'ocr',
+            'classified',
+            'extracting',
+            'validating',
+            'completed',
+            'needs_review',
+            'failed'
+        )
+    ),
+    CONSTRAINT chk_documents_type CHECK (
+        document_type IS NULL OR document_type IN (
+            'invoice',
+            'onboarding_form',
+            'unknown'
+        )
+    )
+);
+
+-- Ensure storage_path exists if documents table already existed from Phase 2
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_path TEXT;
+
+-- Trigger for documents.updated_at
+DROP TRIGGER IF EXISTS trg_documents_updated_at ON documents;
+CREATE TRIGGER trg_documents_updated_at
+    BEFORE UPDATE ON documents
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ==============================================================================
+-- Table 2: document_sections
+-- Purpose: Store logical sections detected inside a document.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS document_sections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    section_name TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    page_number INTEGER NULL,
+    confidence NUMERIC(5, 4) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ==============================================================================
+-- Table 3: extracted_fields
+-- Purpose: Store structured values extracted from document sections with provenance.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS extracted_fields (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    section_id UUID NULL REFERENCES document_sections(id) ON DELETE SET NULL,
+    field_name TEXT NOT NULL,
+    field_value TEXT NULL,
+    confidence NUMERIC(5, 4) NULL,
+    source TEXT NULL,
+    source_text TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_extracted_fields_source CHECK (
+        source IS NULL OR source IN ('ocr', 'gemini', 'vision', 'manual')
+    )
+);
+
+-- ==============================================================================
+-- Table 4: actions
+-- Purpose: Store actionable tasks derived from validated document information.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    due_date DATE NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT chk_actions_priority CHECK (
+        priority IN ('low', 'medium', 'high')
+    ),
+    CONSTRAINT chk_actions_status CHECK (
+        status IN ('pending', 'completed', 'dismissed')
+    )
+);
+
+-- Trigger for actions.updated_at
+DROP TRIGGER IF EXISTS trg_actions_updated_at ON actions;
+CREATE TRIGGER trg_actions_updated_at
+    BEFORE UPDATE ON actions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- ==============================================================================
+-- Table 5: processing_logs
+-- Purpose: Track audit logs and stage transitions during document processing.
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS processing_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL,
+    message TEXT NULL,
+    metadata JSONB NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ==============================================================================
+-- Indexes for Optimal Performance
+-- ==============================================================================
+
+-- documents indexes
+CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+CREATE INDEX IF NOT EXISTS idx_documents_document_type ON documents(document_type);
+
+-- document_sections indexes
+CREATE INDEX IF NOT EXISTS idx_document_sections_document_id ON document_sections(document_id);
+
+-- extracted_fields indexes
+CREATE INDEX IF NOT EXISTS idx_extracted_fields_document_id ON extracted_fields(document_id);
+CREATE INDEX IF NOT EXISTS idx_extracted_fields_section_id ON extracted_fields(section_id);
+
+-- actions indexes
+CREATE INDEX IF NOT EXISTS idx_actions_document_id ON actions(document_id);
+CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status);
+CREATE INDEX IF NOT EXISTS idx_actions_due_date ON actions(due_date);
+
+-- processing_logs indexes
+CREATE INDEX IF NOT EXISTS idx_processing_logs_document_id ON processing_logs(document_id);
+CREATE INDEX IF NOT EXISTS idx_processing_logs_created_at ON processing_logs(created_at DESC);
+
+
+
+================================================
+FILE: docs/SUPABASE_SETUP.md
+================================================
+# Supabase Project Setup Guide
+
+This guide outlines the one-time configuration required in your Supabase project for the **Document-to-Action Pipeline**.
+
+---
+
+## 1. Database Schema Execution
+
+1. Open your [Supabase Dashboard](https://supabase.com/dashboard).
+2. Select your project.
+3. In the left navigation bar, click on **SQL Editor**.
+4. Click **New query**.
+5. Paste the entire contents of [`docs/database.sql`](./database.sql).
+6. Click **Run** (or `Ctrl + Enter`).
+7. Confirm that the query succeeds. The following 5 tables will be active:
+   - `documents` (with `storage_path`)
+   - `document_sections`
+   - `extracted_fields`
+   - `actions`
+   - `processing_logs`
+
+---
+
+## 2. Supabase Storage Bucket Setup
+
+1. In the left navigation bar of your Supabase Dashboard, click on **Storage**.
+2. Click **New bucket**.
+3. Set the **Bucket name** to:
+   ```text
+   documents
+   ```
+4. **Public bucket**: Leave **unchecked** (private bucket) for secure signed-URL access, or public if preferred for local development.
+5. Click **Save bucket**.
+
+### Storage Policies (If bucket is private):
+If Row Level Security (RLS) is enabled for Storage, add a policy to permit uploads:
+- **Allow authenticated / anon uploads**:
+  - In Storage â†’ `documents` bucket â†’ **Configuration** â†’ **Policies**.
+  - Click **New Policy** â†’ **For full customization**.
+  - Name: `Allow public or anon uploads`
+  - Target roles: `anon`, `authenticated`
+  - Allowed operations: `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+  - Review and save.
+
+---
+
+## 3. Environment Variables Configuration
+
+In `backend/.env`, verify that your project credentials are set:
+```ini
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your-anon-or-service-key
+```
+
+Then run the database connectivity verification test:
+```powershell
+e:\HackDevengers\backend\.venv\Scripts\python.exe app/services/verify_db.py
+```
+
 
 
 ================================================
@@ -530,14 +2200,6 @@ export default defineConfig({
 
 
 ================================================
-FILE: frontend/.env.example
-================================================
-# Frontend Environment Variables Template
-VITE_API_BASE_URL=http://localhost:8000
-
-
-
-================================================
 FILE: frontend/src/App.jsx
 ================================================
 import React from 'react';
@@ -610,6 +2272,441 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <App />
   </React.StrictMode>
 );
+
+
+
+================================================
+FILE: frontend/src/components/DocumentUpload.jsx
+================================================
+import React, { useState, useRef } from 'react';
+import { api } from '@/services/api';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  UploadCloud,
+  FileText,
+  Image as ImageIcon,
+  CheckCircle2,
+  AlertCircle,
+  ExternalLink,
+  RotateCcw,
+  Loader2,
+  FileCheck,
+  Layers,
+  Sparkles
+} from 'lucide-react';
+
+const MAX_FILE_SIZE_MB = 10;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+
+const ALLOWED_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png'];
+const ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg'];
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function getFileTypeBadge(filename, mimeType) {
+  const lower = (filename || '').toLowerCase();
+  if (lower.endsWith('.pdf') || mimeType === 'application/pdf') {
+    return { label: 'PDF', color: 'bg-red-500/10 text-red-400 border-red-500/20', isPdf: true };
+  }
+  if (lower.endsWith('.png') || mimeType === 'image/png') {
+    return { label: 'PNG', color: 'bg-blue-500/10 text-blue-400 border-blue-500/20', isPdf: false };
+  }
+  return { label: 'JPG', color: 'bg-amber-500/10 text-amber-400 border-amber-500/20', isPdf: false };
+}
+
+export default function DocumentUpload({ onUploadSuccess }) {
+  const [dragActive, setDragActive] = useState(false);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [error, setError] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedDoc, setUploadedDoc] = useState(null);
+  const [preprocessing, setPreprocessing] = useState(false);
+  const [preprocessResult, setPreprocessResult] = useState(null);
+  const inputRef = useRef(null);
+
+  const validateFile = (file) => {
+    if (!file) return false;
+
+    // Check size
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      setError(`File is too large (${formatBytes(file.size)}). Maximum size is ${MAX_FILE_SIZE_MB} MB.`);
+      return false;
+    }
+
+    // Check extension & MIME
+    const nameLower = file.name.toLowerCase();
+    const hasValidExt = ALLOWED_EXTENSIONS.some((ext) => nameLower.endsWith(ext));
+    const hasValidMime = ALLOWED_MIME_TYPES.includes(file.type?.toLowerCase());
+
+    if (!hasValidExt && !hasValidMime) {
+      setError('File type not supported. Please upload a PDF, JPG, or PNG.');
+      return false;
+    }
+
+    setError(null);
+    return true;
+  };
+
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const file = e.dataTransfer.files[0];
+      if (validateFile(file)) {
+        setSelectedFile(file);
+        setUploadedDoc(null);
+      }
+    }
+  };
+
+  const handleChange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      if (validateFile(file)) {
+        setSelectedFile(file);
+        setUploadedDoc(null);
+      }
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) return;
+
+    setUploading(true);
+    setError(null);
+
+    const result = await api.uploadDocument(selectedFile);
+
+    setUploading(false);
+
+    if (result.ok && result.data) {
+      setUploadedDoc(result.data);
+      setPreprocessResult(null);
+      setSelectedFile(null);
+      if (onUploadSuccess) {
+        onUploadSuccess(result.data);
+      }
+    } else {
+      setError(result.error || 'Upload failed. Please try again.');
+    }
+  };
+
+  const handlePreprocess = async () => {
+    if (!uploadedDoc?.id) return;
+
+    setPreprocessing(true);
+    setError(null);
+
+    const result = await api.preprocessDocument(uploadedDoc.id);
+
+    setPreprocessing(false);
+
+    if (result.ok && result.data) {
+      setPreprocessResult(result.data);
+      setUploadedDoc((prev) => ({
+        ...prev,
+        status: 'preprocessed',
+      }));
+    } else {
+      setError(result.error || 'Preprocessing failed. Please try again.');
+    }
+  };
+
+  const handleReset = () => {
+    setSelectedFile(null);
+    setUploadedDoc(null);
+    setPreprocessResult(null);
+    setError(null);
+    if (inputRef.current) {
+      inputRef.current.value = '';
+    }
+  };
+
+  return (
+    <Card className="w-full max-w-xl mx-auto border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
+      <CardHeader className="pb-3 border-b border-border/40">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <UploadCloud className="h-5 w-5 text-primary" />
+            <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
+          </div>
+          <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
+            Phase 3 Pipeline
+          </Badge>
+        </div>
+        <CardDescription className="text-xs text-muted-foreground">
+          Upload PDF, JPG, or PNG files up to 10 MB for safe pipeline storage
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent className="pt-5 space-y-4">
+        {/* Error Alert */}
+        {error && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">{error}</div>
+          </div>
+        )}
+
+        {/* State 1: Upload Success Result Card */}
+        {uploadedDoc ? (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold">
+                <CheckCircle2 className="h-4 w-4" />
+                <span>
+                  {preprocessResult
+                    ? "Document prepared for OCR"
+                    : "Document uploaded successfully"}
+                </span>
+              </div>
+              <Badge
+                variant={uploadedDoc.status === "preprocessed" ? "success" : "default"}
+                className="capitalize text-xs font-mono"
+              >
+                Status: {uploadedDoc.status || "uploaded"}
+              </Badge>
+            </div>
+
+            <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
+                    {uploadedDoc.mime_type === "application/pdf" ? (
+                      <FileText className="h-5 w-5 text-red-400" />
+                    ) : (
+                      <ImageIcon className="h-5 w-5 text-blue-400" />
+                    )}
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-semibold text-white truncate max-w-[260px] sm:max-w-[320px]">
+                      {uploadedDoc.filename}
+                    </h4>
+                    <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+                      <span>{formatBytes(uploadedDoc.file_size)}</span>
+                      <span>â€¢</span>
+                      <span className="capitalize">{uploadedDoc.document_type || "Unknown Type"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Preprocessed Details Badge / Banner */}
+              {preprocessResult && (
+                <div className="rounded-lg border border-indigo-500/20 bg-indigo-950/20 p-2.5 text-[11px] font-mono text-muted-foreground space-y-1.5">
+                  <div className="flex items-center justify-between text-indigo-300 font-semibold">
+                    <span className="flex items-center gap-1.5">
+                      <Layers className="h-3.5 w-3.5" /> Pages Generated:
+                    </span>
+                    <span>{preprocessResult.page_count} Pages</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Format:</span>
+                    <span className="text-slate-200">
+                      {preprocessResult.mime_type?.includes("pdf") ? "PDF (200 DPI PNGs)" : "Normalized PNG"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Processing Duration:</span>
+                    <span className="text-slate-200">{preprocessResult.metadata?.processing_duration_ms} ms</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
+                <div className="flex items-center justify-between">
+                  <span>Document ID:</span>
+                  <span className="text-slate-300 truncate max-w-[220px]">{uploadedDoc.id}</span>
+                </div>
+                {uploadedDoc.storage_path && (
+                  <div className="flex items-center justify-between">
+                    <span>Storage Path:</span>
+                    <span className="text-slate-300 truncate max-w-[220px]">{uploadedDoc.storage_path}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Actions for uploaded document */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleReset}
+                className="text-xs gap-1.5"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Upload Another
+              </Button>
+
+              <div className="flex items-center gap-2">
+                {uploadedDoc.preview_url && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    asChild
+                    className="text-xs gap-1.5"
+                  >
+                    <a
+                      href={uploadedDoc.preview_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      View Document
+                    </a>
+                  </Button>
+                )}
+
+                {uploadedDoc.status !== "preprocessed" ? (
+                  <Button
+                    size="sm"
+                    onClick={handlePreprocess}
+                    disabled={preprocessing}
+                    className="text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20"
+                  >
+                    {preprocessing ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Preparing document...
+                      </>
+                    ) : (
+                      <>
+                        <Layers className="h-3.5 w-3.5" />
+                        Prepare for OCR
+                      </>
+                    )}
+                  </Button>
+                ) : (
+                  <Badge variant="success" className="text-xs gap-1 py-1 px-2.5">
+                    <Sparkles className="h-3 w-3" />
+                    OCR-Ready
+                  </Badge>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* State 2: Dropzone & File Selection */
+          <div className="space-y-4">
+            <div
+              onDragEnter={handleDrag}
+              onDragLeave={handleDrag}
+              onDragOver={handleDrag}
+              onDrop={handleDrop}
+              onClick={() => inputRef.current?.click()}
+              className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${
+                dragActive
+                  ? 'border-primary bg-primary/10 scale-[1.01]'
+                  : 'border-border/60 hover:border-primary/50 hover:bg-card/50'
+              }`}
+            >
+              <input
+                ref={inputRef}
+                type="file"
+                className="hidden"
+                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                onChange={handleChange}
+              />
+
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 border border-primary/20 text-primary mb-3 shadow-[0_0_15px_rgba(59,130,246,0.2)]">
+                <UploadCloud className="h-6 w-6" />
+              </div>
+
+              <div className="space-y-1 mb-3">
+                <p className="text-sm font-medium text-white">
+                  Drag & drop your document here
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  or <span className="text-primary font-semibold underline underline-offset-2">browse file</span> from your computer
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span className="px-2 py-0.5 rounded bg-muted/50 border border-border/40 font-mono">PDF</span>
+                <span className="px-2 py-0.5 rounded bg-muted/50 border border-border/40 font-mono">JPG</span>
+                <span className="px-2 py-0.5 rounded bg-muted/50 border border-border/40 font-mono">PNG</span>
+                <span>â€¢ Max 10 MB</span>
+              </div>
+            </div>
+
+            {/* Selected File Inspection & Action */}
+            {selectedFile && (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-3.5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <FileCheck className="h-5 w-5 text-primary shrink-0" />
+                  <div className="overflow-hidden">
+                    <p className="text-xs font-semibold text-white truncate max-w-[240px] sm:max-w-[280px]">
+                      {selectedFile.name}
+                    </p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[11px] text-muted-foreground font-mono">
+                        {formatBytes(selectedFile.size)}
+                      </span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded border font-semibold ${getFileTypeBadge(selectedFile.name, selectedFile.type).color}`}>
+                        {getFileTypeBadge(selectedFile.name, selectedFile.type).label}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleReset}
+                    disabled={uploading}
+                    className="text-xs text-muted-foreground hover:text-white"
+                  >
+                    Clear
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleUpload}
+                    disabled={uploading}
+                    className="text-xs gap-1.5 shadow-md shadow-primary/20"
+                  >
+                    {uploading ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Uploading...
+                      </>
+                    ) : (
+                      <>
+                        <UploadCloud className="h-3.5 w-3.5" />
+                        Upload Document
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 
 
@@ -778,6 +2875,7 @@ FILE: frontend/src/pages/FoundationPage.jsx
 ================================================
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '@/services/api';
+import DocumentUpload from '@/components/DocumentUpload';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -862,7 +2960,7 @@ export default function FoundationPage() {
         {/* Foundation Tag */}
         <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-6 backdrop-blur-md">
           <Zap className="h-3.5 w-3.5" />
-          Phase 1 â€” Project Foundation & Development Environment
+          Phase 3 â€” Document Ingestion & Storage Pipeline
         </div>
 
         {/* Hero Title */}
@@ -877,6 +2975,11 @@ export default function FoundationPage() {
         <p className="mx-auto max-w-2xl text-lg sm:text-xl text-slate-300 font-normal leading-relaxed mb-10">
           Transform messy documents into structured, validated and actionable information.
         </p>
+
+        {/* Document Ingestion Zone */}
+        <div className="mb-10">
+          <DocumentUpload />
+        </div>
 
         {/* Live System Connectivity Card */}
         <Card className="mx-auto max-w-xl border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
@@ -987,10 +3090,10 @@ export default function FoundationPage() {
             <p className="text-[11px] text-muted-foreground">FastAPI + CORS + Health endpoint verified</p>
           </div>
           <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs font-medium text-blue-400 mb-1">
-              <ArrowRight className="h-3.5 w-3.5" /> Next: Phase 2
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
+              <ShieldCheck className="h-3.5 w-3.5" /> Ingestion Ready
             </div>
-            <p className="text-[11px] text-muted-foreground">Ready for Supabase DB & Gemini integration</p>
+            <p className="text-[11px] text-muted-foreground">Supabase Storage + PostgreSQL metadata active</p>
           </div>
         </div>
       </main>
@@ -1095,6 +3198,94 @@ export class ApiService {
       return null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Ingest a document via multipart/form-data
+   * @param {File} file - The selected file
+   * @returns {Promise<{ ok: boolean, data?: any, error?: string }>}
+   */
+  async uploadDocument(file) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${this.baseUrl}/api/documents/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        const errorMsg = data?.detail || `Upload failed with HTTP ${response.status}`;
+        return { ok: false, error: errorMsg };
+      }
+
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during document upload.' };
+    }
+  }
+
+  /**
+   * Fetch metadata of an uploaded document
+   * @param {string} documentId
+   */
+  async getDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Document not found.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving document.' };
+    }
+  }
+
+  /**
+   * Fetch signed temporary preview URL for an uploaded document
+   * @param {string} documentId
+   */
+  async getDocumentPreview(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/preview`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load preview.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving preview.' };
+    }
+  }
+
+  /**
+   * Trigger document preprocessing stage (converts pages to OCR-ready format)
+   * @param {string} documentId
+   */
+  async preprocessDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/preprocess`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Preprocessing failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during preprocessing.' };
     }
   }
 }

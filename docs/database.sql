@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS documents (
         status IN (
             'uploaded',
             'preprocessing',
+            'preprocessed',
             'ocr',
             'classified',
             'extracting',

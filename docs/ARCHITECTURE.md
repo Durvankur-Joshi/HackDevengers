@@ -112,6 +112,38 @@ FastAPI Backend (POST /api/documents/upload)
 Frontend Preview (Document Card + Temporary Signed URL Access)
 ```
 
+### Document Preprocessing Flow (Phase 4)
+
+```
+React Frontend ([ Prepare for OCR ] Button)
+    │
+    ▼ POST /api/documents/{document_id}/preprocess
+FastAPI Backend (pipeline/preprocessing.py)
+    │
+    ├──► Fetch original file from Supabase Storage (download_file)
+    ├──► Format & Type Inspection (PDF vs. Image: JPG / PNG)
+    ├──► PDF Branch (PyMuPDF / fitz):
+    │     - Iterate pages in 1-based sequential order
+    │     - Render each page at 200 DPI RGB pixmap (2.7778x zoom)
+    ├──► Image Branch (Pillow):
+    │     - Auto-orient based on EXIF tags
+    │     - Composite RGBA/Palette onto pure white RGB background
+    │     - Constrain maximum dimensions <= 2400px (LANCZOS resample)
+    │     - Enhance contrast slightly (factor 1.15) for crisp text edges
+    ├──► Idempotent Local Storage:
+    │     - Wipe existing directory backend/tmp/processing/{document_id}/
+    │     - Save to page_{page_num:03d}.png with 0600 file permissions
+    ├──► Database Status & Audit Log:
+    │     - Update 'documents' status: 'uploaded' -> 'preprocessing' -> 'preprocessed'
+    │     - Record duration, page count, and resolution in 'processing_logs' table
+    │
+    ▼ JSON Response: PreprocessingResult (PreprocessedPage[])
+[Phase 5: OCR Engine consumes 200 DPI normalized PNGs independently]
+```
+
+> **Decoupled Architecture Rule**: The preprocessing layer is strictly responsible for physical document normalization, orientation, rasterization, and local caching. It **does NOT** extract text, perform OCR, invoke Gemini, or perform schema recognition.
+
+
 ---
 
 ## 2. Frontend Architecture

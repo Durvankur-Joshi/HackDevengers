@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, status
 from app.schemas import DocumentResponse, DocumentPreviewResponse
+from app.pipeline.types import PreprocessingResult
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
 
@@ -261,3 +262,44 @@ async def get_document_preview(document_id: str) -> DocumentPreviewResponse:
         preview_url=signed_url,
         expires_in=3600
     )
+
+
+@router.post("/{document_id}/preprocess", response_model=PreprocessingResult)
+async def preprocess_document_endpoint(document_id: str) -> PreprocessingResult:
+    """
+    Execute document preprocessing stage:
+    1. Retrieve binary document from storage.
+    2. Convert PDF pages to 200 DPI images or normalize image orientation/contrast.
+    3. Save OCR-ready page files in clean temporary processing directory.
+    4. Update document status to 'preprocessed' and write audit logs.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    # Check document existence
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    try:
+        from app.pipeline import preprocess_document
+        result = preprocess_document(document_id)
+        return result
+    except ValueError as val_err:
+        logger.warning(f"Validation error during preprocessing of {document_id}: {val_err}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err)
+        )
+    except Exception as err:
+        logger.error(f"Preprocessing error on document {document_id}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Preprocessing failed: {str(err)}"
+        )

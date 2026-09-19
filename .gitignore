@@ -74,6 +74,8 @@ coverage/
 
 # Local data / uploads / pipeline artifacts
 temp/
+tmp/
+backend/tmp/
 uploads/
 storage/
 *.log

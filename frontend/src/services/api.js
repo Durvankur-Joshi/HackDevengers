@@ -144,6 +144,26 @@ export class ApiService {
       return { ok: false, error: err.message || 'Network error retrieving preview.' };
     }
   }
+
+  /**
+   * Trigger document preprocessing stage (converts pages to OCR-ready format)
+   * @param {string} documentId
+   */
+  async preprocessDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/preprocess`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Preprocessing failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during preprocessing.' };
+    }
+  }
 }
 
 export const api = new ApiService();
