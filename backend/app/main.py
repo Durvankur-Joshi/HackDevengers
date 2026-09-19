@@ -3,7 +3,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api.routes import router
+from app.api.routes import router as base_router
+from app.api.documents import router as documents_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -23,7 +24,8 @@ app.add_middleware(
 )
 
 # Register routes
-app.include_router(router)
+app.include_router(base_router)
+app.include_router(documents_router)
 
 
 if __name__ == "__main__":

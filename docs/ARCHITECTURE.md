@@ -95,6 +95,23 @@ This architecture rejects that anti-pattern:
 +-------------------------------------------------------------------+
 ```
 
+### Document Ingestion Flow (Phase 3)
+
+```
+React Frontend (DocumentUpload Component / Drag-and-Drop)
+    │
+    ▼ multipart/form-data (PDF, JPG, PNG <= 10MB)
+FastAPI Backend (POST /api/documents/upload)
+    │
+    ├──► File Validation (MIME type verification & sanitization)
+    ├──► Supabase Storage Layer (Binary storage in 'documents/{uuid}/{filename}')
+    ├──► Supabase PostgreSQL (Row in 'documents' table, status='uploaded')
+    └──► Audit Logger (Row in 'processing_logs' table, stage='upload')
+    │
+    ▼ JSON Response
+Frontend Preview (Document Card + Temporary Signed URL Access)
+```
+
 ---
 
 ## 2. Frontend Architecture

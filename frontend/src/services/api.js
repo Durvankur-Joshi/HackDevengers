@@ -76,6 +76,74 @@ export class ApiService {
       return null;
     }
   }
+
+  /**
+   * Ingest a document via multipart/form-data
+   * @param {File} file - The selected file
+   * @returns {Promise<{ ok: boolean, data?: any, error?: string }>}
+   */
+  async uploadDocument(file) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${this.baseUrl}/api/documents/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        const errorMsg = data?.detail || `Upload failed with HTTP ${response.status}`;
+        return { ok: false, error: errorMsg };
+      }
+
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during document upload.' };
+    }
+  }
+
+  /**
+   * Fetch metadata of an uploaded document
+   * @param {string} documentId
+   */
+  async getDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Document not found.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving document.' };
+    }
+  }
+
+  /**
+   * Fetch signed temporary preview URL for an uploaded document
+   * @param {string} documentId
+   */
+  async getDocumentPreview(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/preview`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load preview.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving preview.' };
+    }
+  }
 }
 
 export const api = new ApiService();

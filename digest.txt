@@ -1,16 +1,51 @@
 Directory structure:
-└── Hack Devengers/
-    └── document-action/
-        ├── README.md
-        ├── backend/
-        │   └── .gitkeep
-        ├── docs/
-        │   └── ARCHITECTURE.md
-        └── frontend/
-            └── .gitkeep
+└── HackDevengers/
+    ├── README.md
+    ├── backend/
+    │   ├── requirements.txt
+    │   ├── .env.example
+    │   └── app/
+    │       ├── __init__.py
+    │       ├── main.py
+    │       ├── api/
+    │       │   ├── __init__.py
+    │       │   └── routes.py
+    │       ├── core/
+    │       │   ├── __init__.py
+    │       │   └── config.py
+    │       ├── pipeline/
+    │       │   └── __init__.py
+    │       ├── schemas/
+    │       │   └── __init__.py
+    │       └── services/
+    │           └── __init__.py
+    ├── docs/
+    │   └── ARCHITECTURE.md
+    └── frontend/
+        ├── components.json
+        ├── index.html
+        ├── jsconfig.json
+        ├── package.json
+        ├── postcss.config.js
+        ├── tailwind.config.js
+        ├── vite.config.js
+        ├── .env.example
+        └── src/
+            ├── App.jsx
+            ├── index.css
+            ├── main.jsx
+            ├── components/
+            │   └── ui/
+            │       ├── badge.jsx
+            │       ├── button.jsx
+            │       └── card.jsx
+            ├── pages/
+            │   └── FoundationPage.jsx
+            └── services/
+                └── api.js
 
 ================================================
-FILE: document-action/README.md
+FILE: README.md
 ================================================
 # Document-to-Action Pipeline
 
@@ -114,21 +149,956 @@ The initial MVP targets two high-impact document archetypes, maintaining extreme
 
 
 ================================================
-FILE: document-action/backend/.gitkeep
+FILE: backend/requirements.txt
 ================================================
-# Backend directory placeholder (Python + FastAPI)
+fastapi>=0.110.0,<1.0.0
+uvicorn[standard]>=0.28.0,<1.0.0
+pydantic>=2.6.0,<3.0.0
+pydantic-settings>=2.2.0,<3.0.0
+python-dotenv>=1.0.1
 
 
 
 ================================================
-FILE: document-action/docs/ARCHITECTURE.md
+FILE: backend/.env.example
+================================================
+# Backend Environment Configuration
+HOST=0.0.0.0
+PORT=8000
+ENVIRONMENT=development
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+
+
+
+================================================
+FILE: backend/app/__init__.py
+================================================
+"""Document-to-Action Pipeline Backend Application."""
+__version__ = "0.1.0"
+
+
+
+================================================
+FILE: backend/app/main.py
+================================================
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import settings
+from app.api.routes import router
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="Backend API for Document-to-Action Pipeline",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS configuration to allow local frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register routes
+app.include_router(router)
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "app.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=True
+    )
+
+
+
+================================================
+FILE: backend/app/api/__init__.py
+================================================
+"""API package."""
+
+
+
+================================================
+FILE: backend/app/api/routes.py
+================================================
+from fastapi import APIRouter
+from app.schemas import HealthResponse, SystemInfoResponse
+from app.core.config import settings
+
+router = APIRouter()
+
+
+@router.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health_check() -> HealthResponse:
+    """Health check endpoint to verify backend service availability."""
+    return HealthResponse(status="ok")
+
+
+@router.get("/", response_model=SystemInfoResponse, tags=["System"])
+async def root() -> SystemInfoResponse:
+    """Root info endpoint providing basic service status."""
+    return SystemInfoResponse(
+        name=settings.PROJECT_NAME,
+        version=settings.VERSION,
+        status="running",
+        environment=settings.ENVIRONMENT
+    )
+
+
+
+================================================
+FILE: backend/app/core/__init__.py
+================================================
+"""Core configuration and system settings."""
+
+
+
+================================================
+FILE: backend/app/core/config.py
+================================================
+import os
+from typing import List
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "Document-to-Action Pipeline API"
+    VERSION: str = "0.1.0"
+    ENVIRONMENT: str = "development"
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    @property
+    def cors_origin_list(self) -> List[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+
+settings = Settings()
+
+
+
+================================================
+FILE: backend/app/pipeline/__init__.py
+================================================
+"""Document processing pipeline modules (Phase 3+)."""
+
+
+
+================================================
+FILE: backend/app/schemas/__init__.py
+================================================
+from pydantic import BaseModel, Field
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(default="ok", example="ok")
+
+
+class SystemInfoResponse(BaseModel):
+    name: str
+    version: str
+    status: str
+    environment: str
+
+
+
+================================================
+FILE: backend/app/services/__init__.py
+================================================
+"""External and business services (Gemini, Supabase, OCR - Phase 2+)."""
+
+
+
+================================================
+FILE: docs/ARCHITECTURE.md
 ================================================
 Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 2800: character maps to <undefined>
 
 
 ================================================
-FILE: document-action/frontend/.gitkeep
+FILE: frontend/components.json
 ================================================
-# Frontend directory placeholder (React + Vite + Tailwind CSS + shadcn/ui)
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "rsc": false,
+  "tsx": false,
+  "tailwind": {
+    "config": "tailwind.config.js",
+    "css": "src/index.css",
+    "baseColor": "slate",
+    "cssVariables": true
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  }
+}
+
+
+
+================================================
+FILE: frontend/index.html
+================================================
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Transform messy documents into structured, validated and actionable information." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+    <title>Document-to-Action Pipeline</title>
+  </head>
+  <body class="min-h-screen bg-background font-sans antialiased text-foreground">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+
+================================================
+FILE: frontend/jsconfig.json
+================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    },
+    "jsx": "preserve"
+  },
+  "include": ["src/**/*", "vite.config.js"]
+}
+
+
+
+================================================
+FILE: frontend/package.json
+================================================
+{
+  "name": "document-to-action-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "vite": "^6.1.0"
+  }
+}
+
+
+
+================================================
+FILE: frontend/postcss.config.js
+================================================
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+
+
+
+================================================
+FILE: frontend/tailwind.config.js
+================================================
+/** @type {import('tailwindcss').Config} */
+export default {
+  darkMode: ["class"],
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+      },
+      fontFamily: {
+        sans: ['Outfit', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
+      },
+    },
+  },
+  plugins: [],
+};
+
+
+
+================================================
+FILE: frontend/vite.config.js
+================================================
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+  server: {
+    port: 5173,
+    host: true,
+  },
+});
+
+
+
+================================================
+FILE: frontend/.env.example
+================================================
+# Frontend Environment Variables Template
+VITE_API_BASE_URL=http://localhost:8000
+
+
+
+================================================
+FILE: frontend/src/App.jsx
+================================================
+import React from 'react';
+import FoundationPage from '@/pages/FoundationPage';
+
+export default function App() {
+  return <FoundationPage />;
+}
+
+
+
+================================================
+FILE: frontend/src/index.css
+================================================
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 224 71% 4%;
+    --foreground: 213 31% 91%;
+    --card: 224 71% 7%;
+    --card-foreground: 213 31% 91%;
+    --popover: 224 71% 6%;
+    --popover-foreground: 213 31% 91%;
+    --primary: 210 100% 56%;
+    --primary-foreground: 222.2 47.4% 1.2%;
+    --secondary: 222.2 47.4% 11.2%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 223 47% 11%;
+    --muted-foreground: 215.4 16.3% 60%;
+    --accent: 216 34% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 216 34% 17%;
+    --input: 216 34% 17%;
+    --ring: 216 12.2% 83.9%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.12) 0px, transparent 50%),
+      radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.1) 0px, transparent 50%);
+    background-attachment: fixed;
+  }
+}
+
+
+
+================================================
+FILE: frontend/src/main.jsx
+================================================
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+
+
+================================================
+FILE: frontend/src/components/ui/badge.jsx
+================================================
+import * as React from "react";
+import { cva } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const badgeVariants = cva(
+  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  {
+    variants: {
+      variant: {
+        default:
+          "border-transparent bg-primary/20 text-primary-foreground border-primary/30",
+        secondary:
+          "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        destructive:
+          "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
+        outline: "text-foreground",
+        success:
+          "border-emerald-500/30 bg-emerald-500/10 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.2)]",
+        danger:
+          "border-rose-500/30 bg-rose-500/10 text-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.2)]",
+        warning:
+          "border-amber-500/30 bg-amber-500/10 text-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.2)]",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+    },
+  }
+);
+
+function Badge({ className, variant, ...props }) {
+  return (
+    <div className={cn(badgeVariants({ variant }), className)} {...props} />
+  );
+}
+
+export { Badge, badgeVariants };
+
+
+
+================================================
+FILE: frontend/src/components/ui/button.jsx
+================================================
+import * as React from "react";
+import { cva } from "class-variance-authority";
+import { cn } from "@/lib/utils";
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]",
+  {
+    variants: {
+      variant: {
+        default:
+          "bg-primary text-primary-foreground shadow hover:bg-primary/90 hover:shadow-[0_0_15px_rgba(59,130,246,0.3)]",
+        destructive:
+          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background/50 backdrop-blur-sm shadow-sm hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-md px-3 text-xs",
+        lg: "h-10 rounded-md px-8",
+        icon: "h-9 w-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+);
+
+const Button = React.forwardRef(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    return (
+      <button
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Button.displayName = "Button";
+
+export { Button, buttonVariants };
+
+
+
+================================================
+FILE: frontend/src/components/ui/card.jsx
+================================================
+import * as React from "react";
+import { cn } from "@/lib/utils";
+
+const Card = React.forwardRef(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      "rounded-xl border bg-card/70 text-card-foreground shadow-xl backdrop-blur-md transition-all duration-300",
+      className
+    )}
+    {...props}
+  />
+));
+Card.displayName = "Card";
+
+const CardHeader = React.forwardRef(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex flex-col space-y-1.5 p-6", className)}
+    {...props}
+  />
+));
+CardHeader.displayName = "CardHeader";
+
+const CardTitle = React.forwardRef(({ className, ...props }, ref) => (
+  <h3
+    ref={ref}
+    className={cn("font-semibold leading-none tracking-tight", className)}
+    {...props}
+  />
+));
+CardTitle.displayName = "CardTitle";
+
+const CardDescription = React.forwardRef(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+));
+CardDescription.displayName = "CardDescription";
+
+const CardContent = React.forwardRef(({ className, ...props }, ref) => (
+  <div ref={ref} className={cn("p-6 pt-0", className)} {...props} />
+));
+CardContent.displayName = "CardContent";
+
+const CardFooter = React.forwardRef(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn("flex items-center p-6 pt-0", className)}
+    {...props}
+  />
+));
+CardFooter.displayName = "CardFooter";
+
+export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent };
+
+
+
+================================================
+FILE: frontend/src/pages/FoundationPage.jsx
+================================================
+import React, { useState, useEffect, useCallback } from 'react';
+import { api } from '@/services/api';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { 
+  Activity, 
+  CheckCircle2, 
+  XCircle, 
+  RefreshCw, 
+  Server, 
+  Layers, 
+  ArrowRight,
+  ShieldCheck,
+  Terminal,
+  Zap
+} from 'lucide-react';
+
+export default function FoundationPage() {
+  const [healthState, setHealthState] = useState({
+    loading: true,
+    status: 'Checking...',
+    connected: false,
+    latencyMs: null,
+    error: null,
+    lastChecked: null,
+    rawData: null,
+  });
+
+  const checkStatus = useCallback(async () => {
+    setHealthState((prev) => ({ ...prev, loading: true }));
+    const result = await api.checkHealth();
+    setHealthState({
+      loading: false,
+      status: result.status,
+      connected: result.ok,
+      latencyMs: result.latencyMs,
+      error: result.error || null,
+      lastChecked: new Date().toLocaleTimeString(),
+      rawData: result.raw || null,
+    });
+  }, []);
+
+  useEffect(() => {
+    checkStatus();
+    // Periodically verify every 10 seconds
+    const interval = setInterval(checkStatus, 10000);
+    return () => clearInterval(interval);
+  }, [checkStatus]);
+
+  const isConnected = healthState.connected;
+
+  return (
+    <div className="relative min-h-screen flex flex-col justify-between overflow-hidden px-4 py-8 sm:px-6 lg:px-8">
+      {/* Background glowing orbs */}
+      <div className="pointer-events-none absolute -top-40 -left-40 h-96 w-96 rounded-full bg-blue-600/15 blur-3xl" />
+      <div className="pointer-events-none absolute top-1/2 -right-40 h-96 w-96 rounded-full bg-indigo-600/15 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-40 left-1/3 h-96 w-96 rounded-full bg-violet-600/10 blur-3xl" />
+
+      {/* Top Navigation / Header */}
+      <header className="relative z-10 mx-auto w-full max-w-5xl flex items-center justify-between pb-6 border-b border-border/40">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 border border-primary/30 text-primary shadow-[0_0_15px_rgba(59,130,246,0.3)]">
+            <Layers className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+              HackDevengers
+              <span className="text-xs font-normal text-muted-foreground">/ pipeline</span>
+            </h1>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Badge variant={isConnected ? "success" : "danger"} className="gap-1.5 py-1 px-3">
+            <span className={`h-2 w-2 rounded-full ${isConnected ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`} />
+            Backend Status: {isConnected ? "Connected" : "Disconnected"}
+          </Badge>
+        </div>
+      </header>
+
+      {/* Main Foundation Showcase */}
+      <main className="relative z-10 mx-auto my-auto w-full max-w-3xl py-12 text-center">
+        {/* Foundation Tag */}
+        <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-6 backdrop-blur-md">
+          <Zap className="h-3.5 w-3.5" />
+          Phase 1 â€” Project Foundation & Development Environment
+        </div>
+
+        {/* Hero Title */}
+        <h2 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-white mb-4">
+          Document-to-Action <br />
+          <span className="bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
+            Pipeline
+          </span>
+        </h2>
+
+        {/* Required Short Description */}
+        <p className="mx-auto max-w-2xl text-lg sm:text-xl text-slate-300 font-normal leading-relaxed mb-10">
+          Transform messy documents into structured, validated and actionable information.
+        </p>
+
+        {/* Live System Connectivity Card */}
+        <Card className="mx-auto max-w-xl border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
+          <CardHeader className="pb-3 border-b border-border/40">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Server className="h-4 w-4 text-primary" />
+                <CardTitle className="text-base text-white">System Connectivity & Health</CardTitle>
+              </div>
+              <Badge variant="outline" className="text-xs font-mono text-muted-foreground border-border/50">
+                GET /health
+              </Badge>
+            </div>
+            <CardDescription className="text-xs text-muted-foreground">
+              Verifying frontend â†” FastAPI backend API connection
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent className="pt-5 space-y-4">
+            {/* Status indicator row */}
+            <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 p-3.5">
+              <div className="flex items-center gap-3">
+                {healthState.loading ? (
+                  <RefreshCw className="h-5 w-5 text-muted-foreground animate-spin" />
+                ) : isConnected ? (
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+                    <CheckCircle2 className="h-5 w-5" />
+                  </div>
+                ) : (
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-500/20 text-rose-400">
+                    <XCircle className="h-5 w-5" />
+                  </div>
+                )}
+                <div>
+                  <div className="text-sm font-semibold text-white flex items-center gap-2">
+                    Backend Status:{" "}
+                    <span className={isConnected ? "text-emerald-400" : "text-rose-400"}>
+                      {healthState.status}
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Endpoint: <code className="text-slate-300 font-mono">{api.getBaseUrl()}/health</code>
+                  </div>
+                </div>
+              </div>
+
+              {healthState.latencyMs !== null && (
+                <div className="text-right">
+                  <span className="text-xs font-mono text-muted-foreground block">Latency</span>
+                  <span className="text-xs font-mono font-semibold text-emerald-400">
+                    {healthState.latencyMs} ms
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Health payload output */}
+            {isConnected && healthState.rawData && (
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-950/10 p-3 text-xs font-mono text-slate-300">
+                <div className="text-muted-foreground text-[10px] uppercase tracking-wider mb-1 flex items-center gap-1">
+                  <Terminal className="h-3 w-3" /> Response Payload
+                </div>
+                <pre className="text-emerald-300">{JSON.stringify(healthState.rawData, null, 2)}</pre>
+              </div>
+            )}
+
+            {/* Error output if disconnected */}
+            {!isConnected && healthState.error && (
+              <div className="rounded-lg border border-rose-500/20 bg-rose-950/10 p-3 text-xs font-mono text-rose-300">
+                <div className="text-muted-foreground text-[10px] uppercase tracking-wider mb-1">
+                  Connection Error
+                </div>
+                <div>{healthState.error}</div>
+              </div>
+            )}
+
+            {/* Action buttons and info */}
+            <div className="flex items-center justify-between pt-2">
+              <div className="text-xs text-muted-foreground">
+                {healthState.lastChecked && `Last checked: ${healthState.lastChecked}`}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={checkStatus}
+                disabled={healthState.loading}
+                className="gap-1.5 text-xs"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${healthState.loading ? "animate-spin" : ""}`} />
+                Ping Health
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Readiness Checklist */}
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 text-left max-w-xl mx-auto">
+          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
+              <ShieldCheck className="h-3.5 w-3.5" /> Frontend Ready
+            </div>
+            <p className="text-[11px] text-muted-foreground">React + Vite + Tailwind + shadcn/ui configured</p>
+          </div>
+          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
+              <ShieldCheck className="h-3.5 w-3.5" /> Backend Ready
+            </div>
+            <p className="text-[11px] text-muted-foreground">FastAPI + CORS + Health endpoint verified</p>
+          </div>
+          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
+            <div className="flex items-center gap-2 text-xs font-medium text-blue-400 mb-1">
+              <ArrowRight className="h-3.5 w-3.5" /> Next: Phase 2
+            </div>
+            <p className="text-[11px] text-muted-foreground">Ready for Supabase DB & Gemini integration</p>
+          </div>
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="relative z-10 mx-auto w-full max-w-5xl pt-6 border-t border-border/40 text-center text-xs text-muted-foreground">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+          <span>Document-to-Action Pipeline â€¢ HackDevengers</span>
+          <div className="flex items-center gap-3">
+            <span className="hover:text-foreground transition-colors">FastAPI</span>
+            <span>â€¢</span>
+            <span className="hover:text-foreground transition-colors">React Vite</span>
+            <span>â€¢</span>
+            <span className="hover:text-foreground transition-colors">Tailwind CSS</span>
+            <span>â€¢</span>
+            <span className="hover:text-foreground transition-colors">shadcn/ui</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+
+
+================================================
+FILE: frontend/src/services/api.js
+================================================
+/**
+ * Minimal API service abstraction for Document-to-Action Pipeline
+ * Configured with environment variable VITE_API_BASE_URL
+ */
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+
+export class ApiService {
+  constructor(baseUrl = API_BASE_URL) {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+  }
+
+  getBaseUrl() {
+    return this.baseUrl;
+  }
+
+  /**
+   * Health check endpoint to verify backend service status
+   * @returns {Promise<{ ok: boolean, status: string, latencyMs?: number, raw?: any, error?: string }>}
+   */
+  async checkHealth() {
+    const start = performance.now();
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      const latencyMs = Math.round(performance.now() - start);
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: 'Disconnected',
+          latencyMs,
+          error: `HTTP ${response.status}: ${response.statusText}`,
+        };
+      }
+
+      const data = await response.json();
+      return {
+        ok: data.status === 'ok',
+        status: data.status === 'ok' ? 'Connected' : 'Degraded',
+        latencyMs,
+        raw: data,
+      };
+    } catch (err) {
+      const latencyMs = Math.round(performance.now() - start);
+      return {
+        ok: false,
+        status: 'Disconnected',
+        latencyMs,
+        error: err.message || 'Failed to reach backend server',
+      };
+    }
+  }
+
+  /**
+   * Fetch system root metadata if available
+   */
+  async getSystemInfo() {
+    try {
+      const response = await fetch(`${this.baseUrl}/`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+      if (response.ok) {
+        return await response.json();
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+export const api = new ApiService();
 
 

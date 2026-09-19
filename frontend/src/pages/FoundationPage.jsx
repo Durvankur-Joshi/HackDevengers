@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '@/services/api';
+import DocumentUpload from '@/components/DocumentUpload';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -84,7 +85,7 @@ export default function FoundationPage() {
         {/* Foundation Tag */}
         <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-6 backdrop-blur-md">
           <Zap className="h-3.5 w-3.5" />
-          Phase 1 — Project Foundation & Development Environment
+          Phase 3 — Document Ingestion & Storage Pipeline
         </div>
 
         {/* Hero Title */}
@@ -99,6 +100,11 @@ export default function FoundationPage() {
         <p className="mx-auto max-w-2xl text-lg sm:text-xl text-slate-300 font-normal leading-relaxed mb-10">
           Transform messy documents into structured, validated and actionable information.
         </p>
+
+        {/* Document Ingestion Zone */}
+        <div className="mb-10">
+          <DocumentUpload />
+        </div>
 
         {/* Live System Connectivity Card */}
         <Card className="mx-auto max-w-xl border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
@@ -209,10 +215,10 @@ export default function FoundationPage() {
             <p className="text-[11px] text-muted-foreground">FastAPI + CORS + Health endpoint verified</p>
           </div>
           <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs font-medium text-blue-400 mb-1">
-              <ArrowRight className="h-3.5 w-3.5" /> Next: Phase 2
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
+              <ShieldCheck className="h-3.5 w-3.5" /> Ingestion Ready
             </div>
-            <p className="text-[11px] text-muted-foreground">Ready for Supabase DB & Gemini integration</p>
+            <p className="text-[11px] text-muted-foreground">Supabase Storage + PostgreSQL metadata active</p>
           </div>
         </div>
       </main>
