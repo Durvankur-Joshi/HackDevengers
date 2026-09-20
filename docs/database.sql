@@ -146,6 +146,8 @@ CREATE TABLE IF NOT EXISTS actions (
     priority TEXT NOT NULL DEFAULT 'medium',
     due_date DATE NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NULL,
+    source TEXT NULL DEFAULT 'system',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -153,7 +155,7 @@ CREATE TABLE IF NOT EXISTS actions (
         priority IN ('low', 'medium', 'high')
     ),
     CONSTRAINT chk_actions_status CHECK (
-        status IN ('pending', 'completed', 'dismissed')
+        status IN ('pending', 'in_progress', 'completed', 'dismissed')
     )
 );
 

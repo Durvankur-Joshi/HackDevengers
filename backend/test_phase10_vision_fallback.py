@@ -45,7 +45,7 @@ from app.pipeline.types import (
 from app.pipeline.normalizer import FieldNormalizer
 from app.pipeline.validator import DocumentValidator
 from app.pipeline.vision_fallback import VisionFallbackManager, values_agree
-from app.services.gemini import gemini_service
+from app.services.gemini import gemini_service, GeminiServiceError
 
 
 class MockGeminiService:
@@ -464,7 +464,12 @@ class TestPhase10VisionFallback(unittest.TestCase):
 Inspect this image crop and extract the field 'invoice_number'.
 Anti-hallucination: Only output characters clearly visible. If unreadable, return null."""
 
-        result = gemini_service.recover_field_vision(image=crop_img, prompt=prompt)
+        try:
+            result = gemini_service.recover_field_vision(image=crop_img, prompt=prompt)
+        except GeminiServiceError as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                self.skipTest(f"Gemini API rate limit/quota reached: {e}")
+            raise
         self.assertIsInstance(result, GeminiVisionRecoveryOutput)
         self.assertEqual(result.field_name, "invoice_number")
         self.assertIsNotNone(result.value)

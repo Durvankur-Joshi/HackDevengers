@@ -413,3 +413,91 @@ class DocumentVisionFallbackResult(BaseModel):
     updated_validation: Optional[DocumentValidationResult] = Field(default=None, description="Re-validated document results")
     processed_at: str = Field(..., description="ISO 8601 timestamp of fallback execution")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata and thresholds")
+
+
+# --- Phase 11: Intelligent Summary & Action Extraction Models ---
+
+class GeminiDocumentSummaryOutput(BaseModel):
+    """Structured response schema returned by Gemini for document summarization."""
+    summary: str = Field(..., description="Concise, factual executive summary of the document (2-4 sentences)")
+    key_points: List[str] = Field(default_factory=list, description="Top key factual observations (max 5)")
+    review_items: List[str] = Field(default_factory=list, description="Items requiring human review or validation issues (max 5)")
+
+
+class DocumentSummaryResult(BaseModel):
+    """Final output of Phase 11 intelligent document summarization stage."""
+    document_id: str = Field(..., description="Document UUID")
+    document_type: str = Field(..., description="Document type: invoice, onboarding_form, or unknown")
+    status: str = Field(default="summarized", description="Summary status: 'summarized' or 'skipped'")
+    summary: str = Field(..., description="Executive summary")
+    key_points: List[str] = Field(default_factory=list, description="Key points")
+    review_items: List[str] = Field(default_factory=list, description="Review items or flagged issues")
+    generated_at: str = Field(..., description="ISO 8601 timestamp of summary generation")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata")
+
+
+class ActionPriorityEnum(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class ActionStatusEnum(str, Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    DISMISSED = "dismissed"
+
+
+class GeminiRawAction(BaseModel):
+    """Raw action item suggested by Gemini structured output."""
+    action: str = Field(..., description="Concrete, actionable task answering 'what exactly needs to be done'")
+    priority: str = Field(default="medium", description="Priority: 'high', 'medium', or 'low'")
+    due_date: Optional[str] = Field(default=None, description="ISO YYYY-MM-DD due date strictly grounded in document, or null")
+    reason: Optional[str] = Field(default=None, description="Grounded factual rationale or evidence for this action")
+
+
+class GeminiActionExtractionOutput(BaseModel):
+    """Structured response schema returned by Gemini for action extraction."""
+    actions: List[GeminiRawAction] = Field(default_factory=list, description="List of grounded action items")
+
+
+class ActionItem(BaseModel):
+    """Standardized operational task representation matching database actions table."""
+    id: Optional[str] = Field(default=None, description="Action UUID")
+    document_id: str = Field(..., description="Parent document UUID")
+    action: str = Field(..., description="Concrete task description")
+    priority: str = Field(default="medium", description="Priority level: high, medium, or low")
+    due_date: Optional[str] = Field(default=None, description="ISO YYYY-MM-DD deadline date or null")
+    status: str = Field(default="pending", description="Status: pending, in_progress, completed, or dismissed")
+    source: str = Field(default="system", description="Origin: 'deterministic', 'ai', or 'user'")
+    reason: Optional[str] = Field(default=None, description="Grounding justification or validation evidence")
+    created_at: Optional[str] = Field(default=None, description="Creation ISO timestamp")
+    updated_at: Optional[str] = Field(default=None, description="Last update ISO timestamp")
+
+
+class DocumentActionsResult(BaseModel):
+    """Final output of Phase 11 action extraction stage."""
+    document_id: str = Field(..., description="Document UUID")
+    document_type: str = Field(..., description="Document type: invoice, onboarding_form, or unknown")
+    status: str = Field(default="completed", description="Status: 'completed' or 'skipped'")
+    total_actions: int = Field(default=0, description="Total number of actions derived")
+    high_priority_count: int = Field(default=0, description="Number of high priority actions")
+    actions: List[ActionItem] = Field(default_factory=list, description="List of deduplicated, prioritized actions")
+    extracted_at: str = Field(..., description="ISO 8601 timestamp of extraction")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metrics")
+
+
+class DocumentInsightsResult(BaseModel):
+    """Combined output of Phase 11 document summary and action extraction."""
+    document_id: str = Field(..., description="Document UUID")
+    document_type: str = Field(..., description="Document type")
+    summary: DocumentSummaryResult = Field(..., description="Document summary output")
+    actions: DocumentActionsResult = Field(..., description="Extracted action items")
+    generated_at: str = Field(..., description="ISO 8601 timestamp")
+
+
+class ActionStatusUpdateRequest(BaseModel):
+    """Payload for updating an action's execution status."""
+    status: ActionStatusEnum = Field(..., description="New action status")
+

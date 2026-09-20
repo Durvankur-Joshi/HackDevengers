@@ -5,6 +5,7 @@ import logging
 import glob
 import json
 import time
+from datetime import datetime
 from typing import Optional, List
 from PIL import Image
 from fastapi import APIRouter, UploadFile, File, HTTPException, status
@@ -21,6 +22,10 @@ from app.pipeline.types import (
     DocumentValidationSummary,
     DocumentValidationResult,
     DocumentVisionFallbackResult,
+    DocumentSummaryResult,
+    DocumentActionsResult,
+    DocumentInsightsResult,
+    ActionItem,
 )
 from app.pipeline.ocr import get_ocr_engine, OCREngineUnavailableError, OCREngineError
 from app.pipeline.classifier import classify_document
@@ -28,6 +33,8 @@ from app.pipeline.section_detector import detect_sections_for_document
 from app.pipeline.extractor import extract_document_fields
 from app.pipeline.validator import DocumentValidator
 from app.pipeline.vision_fallback import vision_fallback_manager
+from app.pipeline.summarizer import document_summarizer
+from app.pipeline.action_extractor import document_action_extractor
 from app.pipeline.preprocessing import BASE_TMP_DIR
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
@@ -1578,5 +1585,253 @@ async def get_vision_fallback_endpoint(document_id: str) -> DocumentVisionFallba
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Vision fallback result not found for document '{document_id}'. Run POST /api/documents/{document_id}/vision-fallback first."
     )
+
+
+# ==============================================================================
+# Phase 11: Intelligent Summary & Action Extraction Endpoints
+# ==============================================================================
+
+@router.post("/{document_id}/summarize", response_model=DocumentSummaryResult)
+async def summarize_document_endpoint(document_id: str) -> DocumentSummaryResult:
+    """
+    Generate an intelligent, factual, validation-aware executive summary for a document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    if not gemini_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini API key is not configured. Please set GEMINI_API_KEY in backend/.env."
+        )
+
+    # Record start log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="summary",
+            status="started",
+            message="Executive document summary generation started",
+            metadata={"document_type": doc.get("document_type", "unknown")}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record summary start log for {document_id}: {log_err}")
+
+    # Generate summary
+    try:
+        summary_res = document_summarizer.generate_summary(
+            document_id=document_id,
+            document_type=doc.get("document_type"),
+        )
+    except Exception as exec_err:
+        logger.error(f"Summary generation failed for {document_id}: {exec_err}")
+        try:
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="summary",
+                status="failed",
+                message=f"Summary generation failed: {str(exec_err)}",
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Summary generation failed: {str(exec_err)}"
+        )
+
+    # Record completion log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="summary",
+            status="completed",
+            message=f"Executive summary generated successfully ({len(summary_res.key_points)} key points, {len(summary_res.review_items)} review items)",
+            metadata={
+                "status": summary_res.status,
+                "key_points_count": len(summary_res.key_points),
+                "review_items_count": len(summary_res.review_items),
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record completed summary log for {document_id}: {log_err}")
+
+    return summary_res
+
+
+@router.get("/{document_id}/summary", response_model=DocumentSummaryResult)
+async def get_document_summary_endpoint(document_id: str) -> DocumentSummaryResult:
+    """
+    Retrieve stored summary result for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    summary_json_path = os.path.join(target_dir, "summary.json")
+
+    if os.path.isfile(summary_json_path):
+        try:
+            with open(summary_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentSummaryResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read summary.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored summary: {str(err)}"
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Summary not found for document '{document_id}'. Run POST /api/documents/{document_id}/summarize first."
+    )
+
+
+@router.post("/{document_id}/actions", response_model=DocumentActionsResult)
+async def extract_document_actions_endpoint(document_id: str) -> DocumentActionsResult:
+    """
+    Extract concrete, prioritized action items from validated document information.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    # Record start log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="action_extraction",
+            status="started",
+            message="Action item extraction started",
+            metadata={"document_type": doc.get("document_type", "unknown")}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record action extraction start log for {document_id}: {log_err}")
+
+    # Extract actions
+    try:
+        actions_res = document_action_extractor.extract_actions(
+            document_id=document_id,
+            document_type=doc.get("document_type"),
+        )
+    except Exception as exec_err:
+        logger.error(f"Action extraction failed for {document_id}: {exec_err}")
+        try:
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="action_extraction",
+                status="failed",
+                message=f"Action extraction failed: {str(exec_err)}",
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Action extraction failed: {str(exec_err)}"
+        )
+
+    # Record completion log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="action_extraction",
+            status="completed",
+            message=f"Action extraction completed ({len(actions_res.actions)} action items derived)",
+            metadata={
+                "status": actions_res.status,
+                "total_actions": len(actions_res.actions),
+                "high_priority_count": sum(1 for a in actions_res.actions if a.priority == "high"),
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record completed action extraction log for {document_id}: {log_err}")
+
+    return actions_res
+
+
+@router.get("/{document_id}/actions", response_model=DocumentActionsResult)
+async def get_document_actions_endpoint(document_id: str) -> DocumentActionsResult:
+    """
+    Retrieve stored actions result for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    actions_json_path = os.path.join(target_dir, "actions.json")
+
+    if os.path.isfile(actions_json_path):
+        try:
+            with open(actions_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentActionsResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read actions.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored actions: {str(err)}"
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Actions not found for document '{document_id}'. Run POST /api/documents/{document_id}/actions first."
+    )
+
+
+@router.post("/{document_id}/insights", response_model=DocumentInsightsResult)
+async def generate_document_insights_endpoint(document_id: str) -> DocumentInsightsResult:
+    """
+    Orchestrated Phase 11 endpoint: Generates intelligent executive summary AND extracts concrete action items.
+    """
+    summary_res = await summarize_document_endpoint(document_id)
+    actions_res = await extract_document_actions_endpoint(document_id)
+
+    return DocumentInsightsResult(
+        document_id=document_id,
+        document_type=summary_res.document_type,
+        summary=summary_res,
+        actions=actions_res,
+        generated_at=datetime.utcnow().isoformat(),
+    )
+
 
 

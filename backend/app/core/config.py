@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     VISION_FALLBACK_CONFIDENCE_THRESHOLD: float = 0.70
     VISION_CROP_PADDING: int = 25
     VISION_FALLBACK_MAX_ATTEMPTS: int = 1
+    SUMMARY_MAX_KEY_POINTS: int = 5
+    SUMMARY_MAX_REVIEW_ITEMS: int = 5
+    ACTIONS_MAX_COUNT: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

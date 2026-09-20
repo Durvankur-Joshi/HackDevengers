@@ -8,6 +8,8 @@ from app.pipeline.types import (
     GeminiSectionDetectionOutput,
     GeminiRawSection,
     GeminiVisionRecoveryOutput,
+    GeminiDocumentSummaryOutput,
+    GeminiActionExtractionOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -316,5 +318,142 @@ class GeminiService:
             logger.error(f"Gemini Vision recovery API request failed: {e}")
             raise GeminiServiceError(f"AI vision recovery request failed: {str(e)}")
 
+    def generate_document_summary(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+    ) -> GeminiDocumentSummaryOutput:
+        """
+        Generate a concise, factual executive summary, key points, and review items using Gemini.
+        Enforces GeminiDocumentSummaryOutput response schema.
+        """
+        client = self.get_client()
+        model_name = model or settings.GEMINI_MODEL
+
+        try:
+            from google.genai import types
+
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiDocumentSummaryOutput,
+                temperature=0.1,
+            )
+
+            logger.info(f"Calling Gemini model '{model_name}' for document summary...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+
+            raw_text = response.text
+            if not raw_text:
+                raise GeminiServiceError("Gemini returned an empty response for document summary.")
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Malformed JSON from Gemini document summary: {raw_text}")
+                raise GeminiServiceError(f"Gemini returned invalid JSON for summary: {str(json_err)}")
+
+            # Cap key points and review items to settings limits
+            kp = data.get("key_points", [])
+            if isinstance(kp, list):
+                data["key_points"] = [str(item).strip() for item in kp if str(item).strip()][:settings.SUMMARY_MAX_KEY_POINTS]
+            else:
+                data["key_points"] = []
+
+            ri = data.get("review_items", [])
+            if isinstance(ri, list):
+                data["review_items"] = [str(item).strip() for item in ri if str(item).strip()][:settings.SUMMARY_MAX_REVIEW_ITEMS]
+            else:
+                data["review_items"] = []
+
+            return GeminiDocumentSummaryOutput.model_validate(data)
+
+        except GeminiServiceError:
+            raise
+        except Exception as e:
+            logger.error(f"Gemini summary API request failed: {e}")
+            raise GeminiServiceError(f"AI summary request failed: {str(e)}")
+
+    def suggest_contextual_actions(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+    ) -> GeminiActionExtractionOutput:
+        """
+        Suggest grounded contextual actions from structured document data using Gemini.
+        Enforces GeminiActionExtractionOutput response schema.
+        """
+        client = self.get_client()
+        model_name = model or settings.GEMINI_MODEL
+
+        try:
+            from google.genai import types
+
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiActionExtractionOutput,
+                temperature=0.1,
+            )
+
+            logger.info(f"Calling Gemini model '{model_name}' for action extraction...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+
+            raw_text = response.text
+            if not raw_text:
+                raise GeminiServiceError("Gemini returned an empty response for action extraction.")
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Malformed JSON from Gemini action extraction: {raw_text}")
+                raise GeminiServiceError(f"Gemini returned invalid JSON for actions: {str(json_err)}")
+
+            raw_actions = data.get("actions", [])
+            cleaned_actions = []
+            if isinstance(raw_actions, list):
+                for act in raw_actions:
+                    if not isinstance(act, dict):
+                        continue
+                    act_text = str(act.get("action", "")).strip()
+                    if not act_text:
+                        continue
+                    prio = str(act.get("priority", "medium")).lower().strip()
+                    if prio not in ("high", "medium", "low"):
+                        prio = "medium"
+
+                    due = act.get("due_date")
+                    if due is not None:
+                        due_str = str(due).strip()
+                        # Basic ISO date format check
+                        if not due_str or due_str.lower() in ("null", "none", "n/a"):
+                            due = None
+                        else:
+                            due = due_str
+                    else:
+                        due = None
+
+                    cleaned_actions.append({
+                        "action": act_text,
+                        "priority": prio,
+                        "due_date": due,
+                        "reason": str(act.get("reason", "")).strip() or None,
+                    })
+
+            return GeminiActionExtractionOutput.model_validate({"actions": cleaned_actions})
+
+        except GeminiServiceError:
+            raise
+        except Exception as e:
+            logger.error(f"Gemini action extraction API request failed: {e}")
+            raise GeminiServiceError(f"AI action extraction request failed: {str(e)}")
+
 
 gemini_service = GeminiService()
+

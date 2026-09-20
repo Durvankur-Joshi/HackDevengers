@@ -515,6 +515,132 @@ class SupabaseService:
             "cleaned_up": True
         }
 
+    def update_document_summary(self, document_id: str, summary: str) -> Optional[Dict[str, Any]]:
+        """Update the summary field of an existing document."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("documents").update({"summary": summary}).eq("id", document_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.warning(f"Failed to update document summary for {document_id}: {e}")
+        return None
+
+    def get_actions(self, document_id: str) -> List[Dict[str, Any]]:
+        """Retrieve stored action items for a document from Supabase."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("actions").select("*").eq("document_id", document_id).order("created_at").execute()
+            return res.data or []
+        except Exception as e:
+            logger.warning(f"Error querying actions for {document_id}: {e}")
+            return []
+
+    def save_actions(
+        self,
+        document_id: str,
+        actions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Store action items into the existing actions table.
+        Idempotent: preserves existing completed or in_progress actions while updating or inserting new actions.
+        """
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        if not actions:
+            return []
+
+        # Fetch existing actions to preserve user-modified statuses
+        existing_actions = self.get_actions(document_id)
+        existing_by_text = {}
+        for ea in existing_actions:
+            act_text = (ea.get("action") or "").strip().lower()
+            if act_text:
+                existing_by_text[act_text] = ea
+
+        payloads = []
+        for a in actions:
+            act_text = str(a.get("action", "")).strip()
+            if not act_text:
+                continue
+
+            act_lower = act_text.lower()
+            prio = str(a.get("priority", "medium")).lower()
+            if prio not in ("high", "medium", "low"):
+                prio = "medium"
+
+            stat = str(a.get("status", "pending")).lower()
+            # If action already existed and user changed status to completed or in_progress, preserve it
+            if act_lower in existing_by_text:
+                prev_stat = existing_by_text[act_lower].get("status")
+                if prev_stat in ("completed", "in_progress", "dismissed"):
+                    stat = prev_stat
+
+            due = a.get("due_date")
+            reason = a.get("reason")
+            src = a.get("source", "system")
+
+            payload = {
+                "document_id": document_id,
+                "action": act_text,
+                "priority": prio,
+                "status": stat,
+                "due_date": due if due else None,
+            }
+            if reason:
+                payload["reason"] = str(reason)
+            if src:
+                payload["source"] = str(src)
+
+            # If existing action had an id, update it
+            if act_lower in existing_by_text and existing_by_text[act_lower].get("id"):
+                payload["id"] = existing_by_text[act_lower]["id"]
+
+            payloads.append(payload)
+
+        try:
+            res = client.table("actions").upsert(payloads).execute()
+            return res.data or []
+        except Exception as e:
+            err_str = str(e)
+            logger.warning(f"Upsert into actions table failed ({err_str}), falling back to standard columns...")
+            for p in payloads:
+                p.pop("reason", None)
+                p.pop("source", None)
+                if p.get("status") == "in_progress":
+                    p["status"] = "pending"
+            try:
+                res = client.table("actions").upsert(payloads).execute()
+                return res.data or []
+            except Exception as e2:
+                logger.error(f"Failed to upsert actions into Supabase: {e2}")
+                return []
+
+    def update_action_status(self, action_id: str, status: str) -> Optional[Dict[str, Any]]:
+        """Update the status of an existing action item."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        st = status.lower().strip()
+        try:
+            res = client.table("actions").update({"status": st}).eq("id", action_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Failed to update action status for {action_id}: {e}")
+            raise
+        return None
+
 
 # Global singleton instance
 supabase_service = SupabaseService()
+

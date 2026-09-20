@@ -29,6 +29,10 @@ import {
   CheckSquare,
   Eye,
   AlertTriangle,
+  ListTodo,
+  Calendar,
+  Clock,
+  Check,
 } from 'lucide-react';
 
 function formatSectionTitle(sectionName) {
@@ -103,6 +107,11 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [recoveringVision, setRecoveringVision] = useState(false);
   const [visionResult, setVisionResult] = useState(null);
   const [visionError, setVisionError] = useState(null);
+  const [generatingInsights, setGeneratingInsights] = useState(false);
+  const [summaryResult, setSummaryResult] = useState(null);
+  const [actionsResult, setActionsResult] = useState(null);
+  const [insightsError, setInsightsError] = useState(null);
+  const [actionUpdatingId, setActionUpdatingId] = useState(null);
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
@@ -382,8 +391,61 @@ export default function DocumentUpload({ onUploadSuccess }) {
     setExpandedFields({});
     setOcrProgressText('');
     setError(null);
+    setGeneratingInsights(false);
+    setSummaryResult(null);
+    setActionsResult(null);
+    setInsightsError(null);
+    setActionUpdatingId(null);
     if (inputRef.current) {
       inputRef.current.value = '';
+    }
+  };
+
+  const handleGenerateInsights = async () => {
+    if (!uploadedDoc?.id) return;
+    setGeneratingInsights(true);
+    setInsightsError(null);
+
+    const result = await api.generateInsights(uploadedDoc.id);
+    setGeneratingInsights(false);
+
+    if (result.ok && result.data) {
+      setSummaryResult(result.data.summary);
+      setActionsResult(result.data.actions);
+      if (result.data.document_status) {
+        setUploadedDoc((prev) => ({
+          ...prev,
+          status: result.data.document_status,
+        }));
+      }
+    } else {
+      setInsightsError(result.error || 'Failed to generate summary and actions.');
+    }
+  };
+
+  const handleUpdateActionStatus = async (actionId, newStatus) => {
+    if (!actionId || !actionsResult) return;
+    setActionUpdatingId(actionId);
+
+    // Optimistic update
+    const previousActions = [...actionsResult.actions];
+    setActionsResult((prev) => ({
+      ...prev,
+      actions: prev.actions.map((act) =>
+        act.id === actionId ? { ...act, status: newStatus } : act
+      ),
+    }));
+
+    const result = await api.updateActionStatus(actionId, newStatus);
+    setActionUpdatingId(null);
+
+    if (!result.ok) {
+      // Rollback on failure
+      setActionsResult((prev) => ({
+        ...prev,
+        actions: previousActions,
+      }));
+      setInsightsError(result.error || 'Failed to update action status.');
     }
   };
 
@@ -396,7 +458,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
           </div>
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 10 Pipeline
+            Phase 11 Pipeline
           </Badge>
         </div>
         <CardDescription className="text-xs text-muted-foreground">
@@ -417,6 +479,13 @@ export default function DocumentUpload({ onUploadSuccess }) {
           <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
             <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
             <div className="flex-1">{validationError}</div>
+          </div>
+        )}
+
+        {insightsError && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">{insightsError}</div>
           </div>
         )}
 
@@ -449,6 +518,10 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <span className="text-muted-foreground/60 shrink-0">→</span>
             <div className={`flex items-center gap-1 shrink-0 ${validationResult ? (validationResult.document_status === 'completed' ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold') : (extractionResult && extractionResult.status !== 'skipped' ? 'text-emerald-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
               {validationResult ? (validationResult.document_status === 'completed' ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-400" />) : <span className={`h-1.5 w-1.5 rounded-full ${extractionResult && extractionResult.status !== 'skipped' ? 'bg-emerald-400' : 'bg-slate-600'}`} />} Validate
+            </div>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${summaryResult && actionsResult ? 'text-emerald-400 font-semibold' : (validationResult ? 'text-amber-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
+              {summaryResult && actionsResult ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <span className={`h-1.5 w-1.5 rounded-full ${validationResult ? 'bg-amber-400' : 'bg-slate-600'}`} />} Insights & Actions
             </div>
           </div>
         )}
@@ -1234,6 +1307,217 @@ export default function DocumentUpload({ onUploadSuccess }) {
                 </div>
               )}
 
+              {/* Phase 11: Intelligent Document Summary Panel */}
+              {summaryResult && (
+                <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3 text-xs font-mono space-y-2.5">
+                  <div className="flex items-center justify-between text-purple-300 font-semibold border-b border-purple-500/20 pb-2">
+                    <span className="flex items-center gap-1.5 text-purple-300">
+                      <Sparkles className="h-4 w-4 text-purple-400" /> Phase 11: Document Summary
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] uppercase font-mono border-purple-500/40 text-purple-300 bg-purple-500/10"
+                    >
+                      {summaryResult.document_type || 'Summary'}
+                    </Badge>
+                  </div>
+
+                  {/* Summary Text Narrative */}
+                  <div className="rounded bg-background/80 p-2.5 border border-border/40 text-slate-200 text-xs font-sans leading-relaxed">
+                    {summaryResult.summary_text}
+                  </div>
+
+                  {/* Key Points (Up to 5) */}
+                  {summaryResult.key_points?.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                        <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
+                        Key Points ({summaryResult.key_points.length})
+                      </div>
+                      <div className="space-y-1">
+                        {summaryResult.key_points.map((point, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-start gap-2 rounded bg-background/60 p-2 border border-border/30 text-[11px] text-slate-300 font-sans"
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                            <span className="flex-1">{point}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Attention / Review Items (Up to 5) */}
+                  {summaryResult.review_items?.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                        Attention Required ({summaryResult.review_items.length})
+                      </div>
+                      <div className="space-y-1">
+                        {summaryResult.review_items.map((item, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-start gap-2 rounded bg-amber-950/20 p-2 border border-amber-500/30 text-[11px] text-amber-200 font-sans"
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0" />
+                            <span className="flex-1">{item}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Phase 11: Action Items Board */}
+              {actionsResult && (
+                <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 text-xs font-mono space-y-2.5">
+                  <div className="flex items-center justify-between text-cyan-300 font-semibold border-b border-cyan-500/20 pb-2">
+                    <span className="flex items-center gap-1.5 text-cyan-300">
+                      <ListTodo className="h-4 w-4 text-cyan-400" /> Phase 11: Action Items
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] font-mono border-cyan-500/40 text-cyan-300 bg-cyan-500/10"
+                    >
+                      {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0} / {actionsResult.total_actions ?? 0} Done
+                    </Badge>
+                  </div>
+
+                  {/* Summary Metric Counters */}
+                  <div className="grid grid-cols-4 gap-2 py-0.5 text-center">
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[9px] text-muted-foreground uppercase">Total</div>
+                      <div className="text-sm font-bold text-white">{actionsResult.total_actions ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
+                      <div className="text-[9px] text-rose-400 uppercase">High Priority</div>
+                      <div className="text-sm font-bold text-rose-400">{actionsResult.high_priority_count ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-amber-500/30">
+                      <div className="text-[9px] text-amber-400 uppercase">Pending</div>
+                      <div className="text-sm font-bold text-amber-400">
+                        {actionsResult.actions?.filter((a) => a.status === 'pending').length ?? 0}
+                      </div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
+                      <div className="text-[9px] text-emerald-400 uppercase">Completed</div>
+                      <div className="text-sm font-bold text-emerald-400">
+                        {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions List */}
+                  {actionsResult.actions?.length > 0 ? (
+                    <div className="space-y-2 pt-1">
+                      <div className="text-[11px] font-semibold text-slate-200">
+                        Extracted Tasks ({actionsResult.actions.length})
+                      </div>
+                      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                        {actionsResult.actions.map((act) => {
+                          const isHigh = act.priority === 'high';
+                          const isMed = act.priority === 'medium';
+                          const isCompleted = act.status === 'completed';
+                          const isInProgress = act.status === 'in_progress';
+                          const isUpdating = actionUpdatingId === act.id;
+
+                          return (
+                            <div
+                              key={act.id}
+                              className={`rounded-lg p-2.5 border text-[11px] space-y-2 transition-colors ${
+                                isCompleted
+                                  ? 'border-emerald-500/30 bg-emerald-950/10 opacity-75'
+                                  : isInProgress
+                                    ? 'border-blue-500/40 bg-blue-950/20'
+                                    : isHigh
+                                      ? 'border-rose-500/40 bg-rose-950/15'
+                                      : 'border-border/40 bg-background/70'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-start gap-2 flex-1 min-w-0">
+                                  <Badge
+                                    variant="outline"
+                                    className={`text-[9px] uppercase font-bold shrink-0 px-1.5 py-0.2 ${
+                                      isHigh
+                                        ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+                                        : isMed
+                                          ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                                          : 'border-slate-500/50 bg-slate-500/10 text-slate-300'
+                                    }`}
+                                  >
+                                    {act.priority}
+                                  </Badge>
+                                  <span className={`font-medium text-xs text-white font-sans ${isCompleted ? 'line-through text-slate-400' : ''}`}>
+                                    {act.title}
+                                  </span>
+                                </div>
+
+                                {/* Status Selector Toggle */}
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {isUpdating ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                                  ) : (
+                                    <select
+                                      value={act.status}
+                                      onChange={(e) => handleUpdateActionStatus(act.id, e.target.value)}
+                                      className={`text-[10px] font-mono px-2 py-1 rounded border cursor-pointer bg-background/90 transition-colors ${
+                                        isCompleted
+                                          ? 'border-emerald-500/50 text-emerald-300'
+                                          : isInProgress
+                                            ? 'border-blue-500/50 text-blue-300'
+                                            : 'border-amber-500/50 text-amber-300'
+                                      }`}
+                                    >
+                                      <option value="pending">Pending</option>
+                                      <option value="in_progress">In Progress</option>
+                                      <option value="completed">Completed</option>
+                                      <option value="dismissed">Dismissed</option>
+                                    </select>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Action Metadata: Due Date & Source */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground pt-1 border-t border-border/20">
+                                <div className="flex items-center gap-1.5">
+                                  <Calendar className="h-3 w-3 text-slate-400" />
+                                  <span>
+                                    {act.due_date ? (
+                                      <span className="text-amber-300 font-semibold font-mono">Due: {act.due_date}</span>
+                                    ) : (
+                                      <span className="italic text-slate-500">No due date</span>
+                                    )}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-slate-500">Source:</span>
+                                  <span className="text-slate-300 capitalize">{act.source?.replace('_', ' ') || 'rule based'}</span>
+                                </div>
+                              </div>
+
+                              {/* Reason / Context Footnote */}
+                              {act.reason && (
+                                <div className="text-[10px] text-slate-400 italic bg-background/50 p-1.5 rounded border border-border/20">
+                                  Reason: {act.reason}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground italic text-center py-2">
+                      No actionable tasks required for this document.
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
                 <div className="flex items-center justify-between">
                   <span>Document ID:</span>
@@ -1402,8 +1686,26 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       size="sm"
+                      onClick={handleGenerateInsights}
+                      disabled={generatingInsights || recoveringVision || validating}
+                      className="text-xs gap-1.5 bg-gradient-to-r from-amber-600 to-emerald-600 hover:from-amber-500 hover:to-emerald-500 text-white shadow-md shadow-amber-500/20 cursor-pointer"
+                    >
+                      {generatingInsights ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Generating Insights...
+                        </>
+                      ) : (
+                        <>
+                          <ListTodo className="h-3.5 w-3.5" />
+                          {summaryResult && actionsResult ? 'Regenerate Insights' : 'Generate Summary & Actions'}
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
                       onClick={handleVisionFallback}
-                      disabled={recoveringVision || validating}
+                      disabled={recoveringVision || validating || generatingInsights}
                       className="text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20 cursor-pointer"
                     >
                       {recoveringVision ? (
@@ -1422,7 +1724,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       size="sm"
                       variant="outline"
                       onClick={handleValidate}
-                      disabled={validating || recoveringVision}
+                      disabled={validating || recoveringVision || generatingInsights}
                       className="text-xs gap-1 border-emerald-500/30 text-emerald-300 hover:bg-emerald-950/30 cursor-pointer"
                     >
                       {validating ? (

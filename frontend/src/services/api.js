@@ -406,7 +406,133 @@ export class ApiService {
       return { ok: false, error: err.message || 'Network error retrieving vision fallback results.' };
     }
   }
+
+  /**
+   * Generate Phase 11 intelligent document summary
+   * @param {string} documentId
+   */
+  async generateSummary(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/summarize`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Summary generation failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during summary generation.' };
+    }
+  }
+
+  /**
+   * Retrieve cached document summary
+   * @param {string} documentId
+   */
+  async getSummary(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/summary`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load summary.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving summary.' };
+    }
+  }
+
+  /**
+   * Extract Phase 11 prioritized action items
+   * @param {string} documentId
+   */
+  async extractActions(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/actions`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Action extraction failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during action extraction.' };
+    }
+  }
+
+  /**
+   * Retrieve cached action items
+   * @param {string} documentId
+   */
+  async getActions(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/actions`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load actions.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving actions.' };
+    }
+  }
+
+  /**
+   * Generate Phase 11 combined insights (summary + actions)
+   * @param {string} documentId
+   */
+  async generateInsights(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/insights`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Insights generation failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during insights generation.' };
+    }
+  }
+
+  /**
+   * Update action status ('pending', 'in_progress', 'completed', 'dismissed')
+   * @param {string} actionId
+   * @param {string} status
+   */
+  async updateActionStatus(actionId, status) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/actions/${actionId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not update action status.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error updating action status.' };
+    }
+  }
 }
 
 export const api = new ApiService();
+
 

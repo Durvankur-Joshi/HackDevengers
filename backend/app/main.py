@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.routes import router as base_router
 from app.api.documents import router as documents_router
+from app.api.actions import router as actions_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -26,6 +27,7 @@ app.add_middleware(
 # Register routes
 app.include_router(base_router)
 app.include_router(documents_router)
+app.include_router(actions_router)
 
 
 if __name__ == "__main__":
