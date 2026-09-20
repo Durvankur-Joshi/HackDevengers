@@ -270,6 +270,18 @@ class SupabaseService:
             val_msg = f.validation_message if hasattr(f, "validation_message") else f.get("validation_message")
             norm_at = f.normalized_at if hasattr(f, "normalized_at") else f.get("normalized_at")
 
+            ocr_val = f.ocr_value if hasattr(f, "ocr_value") else f.get("ocr_value")
+            ocr_conf = f.ocr_confidence if hasattr(f, "ocr_confidence") else f.get("ocr_confidence")
+            vis_val = f.vision_value if hasattr(f, "vision_value") else f.get("vision_value")
+            vis_conf = f.vision_confidence if hasattr(f, "vision_confidence") else f.get("vision_confidence")
+            vis_src_txt = f.vision_source_text if hasattr(f, "vision_source_text") else f.get("vision_source_text")
+            fb_att = f.fallback_attempted if hasattr(f, "fallback_attempted") else f.get("fallback_attempted", False)
+            fb_reas = f.fallback_reason if hasattr(f, "fallback_reason") else f.get("fallback_reason")
+
+            val_str = str(fval) if fval is not None else None
+            conf_num = round(float(fconf), 4) if fconf is not None else None
+            valid_src = str(fsrc) if fsrc in ("ocr", "gemini", "vision", "vision_fallback", "ocr+vision", "manual", "validation") else "gemini"
+
             payload = {
                 "document_id": document_id,
                 "field_name": str(fname),
@@ -287,6 +299,27 @@ class SupabaseService:
             if norm_at is not None:
                 payload["normalized_at"] = str(norm_at)
 
+            if ocr_val is not None:
+                payload["ocr_value"] = str(ocr_val)
+            if ocr_conf is not None:
+                try:
+                    payload["ocr_confidence"] = round(float(ocr_conf), 4)
+                except (ValueError, TypeError):
+                    pass
+            if vis_val is not None:
+                payload["vision_value"] = str(vis_val)
+            if vis_conf is not None:
+                try:
+                    payload["vision_confidence"] = round(float(vis_conf), 4)
+                except (ValueError, TypeError):
+                    pass
+            if vis_src_txt is not None:
+                payload["vision_source_text"] = str(vis_src_txt)
+            if fb_att:
+                payload["fallback_attempted"] = True
+            if fb_reas is not None:
+                payload["fallback_reason"] = str(fb_reas)
+
             if sec_uuid:
                 payload["section_id"] = sec_uuid
             payloads.append(payload)
@@ -296,19 +329,29 @@ class SupabaseService:
             return res.data or []
         except Exception as e:
             err_str = str(e)
-            # If failed due to unmigrated validation columns, fallback to basic fields
-            if "normalized_value" in err_str or "validation_status" in err_str or "42703" in err_str:
-                logger.warning(f"Supabase extracted_fields missing validation columns ({err_str}). Falling back to standard columns. (Run docs/migrations/phase9_validation_columns.sql to enable DB column storage).")
+            # If failed due to unmigrated validation or vision fallback columns, fallback to basic fields
+            vision_cols = ("normalized_value", "validation_status", "ocr_value", "vision_value", "fallback_attempted", "42703")
+            if any(col in err_str for col in vision_cols):
+                logger.warning(f"Supabase extracted_fields missing extended columns ({err_str}). Falling back to standard columns. (Run docs/migrations/ to enable DB column storage).")
                 for p in payloads:
                     p.pop("normalized_value", None)
                     p.pop("validation_status", None)
                     p.pop("validation_message", None)
                     p.pop("normalized_at", None)
+                    p.pop("ocr_value", None)
+                    p.pop("ocr_confidence", None)
+                    p.pop("vision_value", None)
+                    p.pop("vision_confidence", None)
+                    p.pop("vision_source_text", None)
+                    p.pop("fallback_attempted", None)
+                    p.pop("fallback_reason", None)
+                    if p.get("source") not in ("ocr", "gemini", "vision", "manual", "validation"):
+                        p["source"] = "gemini"
                 try:
                     res = client.table("extracted_fields").insert(payloads).execute()
                     return res.data or []
                 except Exception as e_retry:
-                    logger.warning(f"Fallback insert without validation columns failed: {e_retry}")
+                    logger.warning(f"Fallback insert without extended columns failed: {e_retry}")
 
             # If failed due to FK constraint on section_id, retry without section_id
             logger.warning(f"Insert with section_id failed ({e}), attempting fallback without section_id...")
@@ -318,6 +361,15 @@ class SupabaseService:
                 p.pop("validation_status", None)
                 p.pop("validation_message", None)
                 p.pop("normalized_at", None)
+                p.pop("ocr_value", None)
+                p.pop("ocr_confidence", None)
+                p.pop("vision_value", None)
+                p.pop("vision_confidence", None)
+                p.pop("vision_source_text", None)
+                p.pop("fallback_attempted", None)
+                p.pop("fallback_reason", None)
+                if p.get("source") not in ("ocr", "gemini", "vision", "manual", "validation"):
+                    p["source"] = "gemini"
             try:
                 res = client.table("extracted_fields").insert(payloads).execute()
                 return res.data or []

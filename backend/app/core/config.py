@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-flash"
     CLASSIFICATION_CONFIDENCE_THRESHOLD: float = 0.70
     INVOICE_ROUNDING_TOLERANCE: float = 0.05
+    VISION_FALLBACK_CONFIDENCE_THRESHOLD: float = 0.70
+    VISION_CROP_PADDING: int = 25
+    VISION_FALLBACK_MAX_ATTEMPTS: int = 1
 
     model_config = SettingsConfigDict(
         env_file=".env",

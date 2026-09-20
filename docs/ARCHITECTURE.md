@@ -561,6 +561,52 @@ Stage 9: Persistence & Delivery
 
 ---
 
+## 7.1 Phase 10 — Low-Confidence & Handwriting Vision Fallback
+
+### Core Philosophy
+OCR remains the foundational engine of the Document-to-Action pipeline. However, degraded scans, low-contrast text, stylized typography, and physical handwriting can yield low confidence scores (< 0.70) or corrupted readings. Phase 10 introduces a **targeted, localized vision fallback layer** using Gemini 2.5 Flash Multimodal Vision.
+
+```
+[Targeted Field Candidate]
+  (Confidence < 0.70 OR Corrupted Format OR Flagged Missing)
+          │
+          ▼
+[Localized Bounding Box Locator]
+  (Matches OCRBlocks or Section Enclosing BBox)
+          │
+          ▼
+[Clamped Context Cropper (padding = 25px)]
+  (Crops page_{n:03d}.png; clamps to image dimensions)
+          │
+          ▼
+[Gemini Vision AI (Multimodal Image Crop + Strict Anti-Hallucination Prompt)]
+  (Returns typed GeminiVisionRecoveryOutput)
+          │
+          ▼
+[Recovery Evaluator]
+  ├── Agree: Vision confirms OCR reading -> marks 'ocr+vision'
+  ├── Recover: OCR was empty or low-conf -> corrected to visual read
+  ├── Conflict: High-conf OCR and Vision disagree -> flagged 'conflict'
+  └── Unreadable: Text illegible -> returns null, flagged 'needs_review'
+          │
+          ▼
+[Automatic Re-normalization & Re-validation Loop]
+  ├── FieldNormalizer() computes canonical representation
+  └── DocumentValidator() re-evaluates deterministic business & math rules
+          │
+          ▼
+[Persistent Storage & Audit Log]
+  (vision_fallback.json + Supabase extracted_fields provenance update)
+```
+
+### Architectural Guardrails
+1. **Never Pass Full Document Pages**: Only surgical image crops with context padding (+25px) are passed to Gemini Vision.
+2. **Strict Anti-Hallucination Policy**: Gemini Vision is strictly instructed to return `null` if handwriting or characters are ambiguous or illegible. Autocompleting or guessing is strictly forbidden.
+3. **Selective Triggering**: Never calls vision indiscriminately on all fields. Arithmetic discrepancy warnings with high confidence do not trigger vision fallback.
+4. **Provenance Preservation**: Retains both `ocr_value`/`ocr_confidence` and `vision_value`/`vision_confidence` side-by-side in database and API payloads.
+
+---
+
 ## 8. Future pgvector Integration
 
 While pgvector is **explicitly excluded** from the core 24-hour MVP to avoid scope creep, the database schema and document service are designed with vector extensibility in mind:

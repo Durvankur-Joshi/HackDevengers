@@ -327,6 +327,13 @@ class ExtractedField(BaseModel):
     validation_status: Optional[str] = Field(default=None, description="Validation status: 'valid', 'needs_review', or 'conflict'")
     validation_message: Optional[str] = Field(default=None, description="Explanation for non-valid status")
     normalized_at: Optional[str] = Field(default=None, description="ISO timestamp of normalization/validation")
+    ocr_value: Optional[Any] = Field(default=None, description="Original OCR-extracted raw value for provenance")
+    ocr_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Original OCR confidence score")
+    vision_value: Optional[str] = Field(default=None, description="Recovered value from Gemini Vision fallback")
+    vision_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence score from Gemini Vision")
+    vision_source_text: Optional[str] = Field(default=None, description="Contextual text read in visual crop")
+    fallback_attempted: bool = Field(default=False, description="Whether vision fallback was attempted for this field")
+    fallback_reason: Optional[str] = Field(default=None, description="Trigger reason for vision fallback")
 
 
 class DocumentExtractionResult(BaseModel):
@@ -367,3 +374,42 @@ class DocumentValidationResult(BaseModel):
     validation_issues: List[Dict[str, Any]] = Field(default_factory=list, description="List of non-valid issues with field and message")
     validated_at: str = Field(..., description="ISO 8601 timestamp of validation execution")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata including tolerance and rules evaluated")
+
+
+# --- Phase 10: Low-Confidence & Handwriting Vision Fallback Models ---
+
+class GeminiVisionRecoveryOutput(BaseModel):
+    """Structured response schema returned by Gemini Vision for a targeted image crop."""
+    field_name: str = Field(..., description="Canonical field identifier requested")
+    value: Optional[str] = Field(default=None, description="Extracted visible field value, or null if unreadable/ambiguous")
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence in the visual reading (0.0 to 1.0)")
+    source_text: Optional[str] = Field(default=None, description="Surrounding visible text context in crop")
+    reason: Optional[str] = Field(default=None, description="Visual observation or justification")
+
+
+class VisionFallbackFieldResult(BaseModel):
+    """Result of an individual field vision fallback evaluation."""
+    field_name: str = Field(..., description="Canonical field identifier")
+    action_taken: str = Field(..., description="Outcome: 'recovered', 'agreed', 'conflict', 'unreadable', or 'skipped'")
+    ocr_value: Optional[Any] = Field(default=None, description="Previous OCR-extracted value")
+    ocr_confidence: Optional[float] = Field(default=None, description="Previous OCR confidence")
+    vision_value: Optional[str] = Field(default=None, description="Value returned by Gemini Vision")
+    vision_confidence: Optional[float] = Field(default=None, description="Confidence returned by Gemini Vision")
+    reason: Optional[str] = Field(default=None, description="Explanation of action taken")
+    crop_box: Optional[BoundingBox] = Field(default=None, description="Pixel bounding box cropped from preprocessed page")
+    page_number: int = Field(default=1, description="Page number cropped")
+
+
+class DocumentVisionFallbackResult(BaseModel):
+    """Final output of Phase 10 Targeted Vision Fallback stage."""
+    document_id: str = Field(..., description="Document UUID")
+    document_type: str = Field(..., description="Document type: invoice, onboarding_form, or unknown")
+    status: str = Field(default="completed", description="'completed', 'skipped', or 'no_candidates'")
+    candidates_identified: int = Field(default=0, description="Number of low-confidence or suspicious fields identified")
+    fields_recovered: int = Field(default=0, description="Number of fields successfully corrected/recovered by vision")
+    conflicts_detected: int = Field(default=0, description="Number of conflicts between OCR and vision")
+    fallback_fields: List[VisionFallbackFieldResult] = Field(default_factory=list, description="Per-field fallback outcomes")
+    fields: List[ExtractedField] = Field(default_factory=list, description="Updated extracted fields with vision provenance")
+    updated_validation: Optional[DocumentValidationResult] = Field(default=None, description="Re-validated document results")
+    processed_at: str = Field(..., description="ISO 8601 timestamp of fallback execution")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Execution metadata and thresholds")

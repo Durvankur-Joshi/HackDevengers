@@ -366,6 +366,47 @@ export class ApiService {
       return { ok: false, error: err.message || 'Network error retrieving validation results.' };
     }
   }
+
+  /**
+   * Execute Phase 10 Low-Confidence & Handwriting Vision Fallback
+   * @param {string} documentId
+   */
+  async runVisionFallback(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/vision-fallback`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Vision fallback failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during vision fallback.' };
+    }
+  }
+
+  /**
+   * Retrieve cached vision fallback results for an existing document
+   * @param {string} documentId
+   */
+  async getVisionFallback(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/vision-fallback`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load vision fallback results.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving vision fallback results.' };
+    }
+  }
 }
 
 export const api = new ApiService();
+

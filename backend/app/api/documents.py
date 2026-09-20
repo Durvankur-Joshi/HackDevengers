@@ -20,12 +20,14 @@ from app.pipeline.types import (
     DocumentExtractionResult,
     DocumentValidationSummary,
     DocumentValidationResult,
+    DocumentVisionFallbackResult,
 )
 from app.pipeline.ocr import get_ocr_engine, OCREngineUnavailableError, OCREngineError
 from app.pipeline.classifier import classify_document
 from app.pipeline.section_detector import detect_sections_for_document
 from app.pipeline.extractor import extract_document_fields
 from app.pipeline.validator import DocumentValidator
+from app.pipeline.vision_fallback import vision_fallback_manager
 from app.pipeline.preprocessing import BASE_TMP_DIR
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
@@ -1430,4 +1432,151 @@ async def get_document_validation_endpoint(document_id: str) -> DocumentValidati
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Validation result not found for document '{document_id}'. Run POST /api/documents/{document_id}/validate first."
     )
+
+
+@router.post("/{document_id}/vision-fallback", response_model=DocumentVisionFallbackResult)
+async def vision_fallback_endpoint(document_id: str) -> DocumentVisionFallbackResult:
+    """
+    Execute Phase 10 Low-Confidence & Handwriting Vision Fallback:
+    1. Validate document existence in PostgreSQL database.
+    2. Check Gemini API configuration.
+    3. Record audit log: stage='vision_fallback', status='started'.
+    4. Execute targeted vision fallback on qualifying low-confidence or corrupted fields.
+    5. Re-normalize and re-validate document fields.
+    6. Persist updated fields to Supabase extracted_fields.
+    7. Update documents.status if validation outcome changed.
+    8. Record audit log: stage='vision_fallback', status='completed'.
+    9. Return DocumentVisionFallbackResult.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    if not gemini_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini API key is not configured. Please set GEMINI_API_KEY in backend/.env."
+        )
+
+    start_time = time.time()
+
+    # Record start log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="vision_fallback",
+            status="started",
+            message="Targeted vision fallback evaluation started",
+            metadata={"document_type": doc.get("document_type", "unknown")}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record vision fallback start log for {document_id}: {log_err}")
+
+    # Execute fallback
+    try:
+        fallback_res = vision_fallback_manager.execute_fallback(
+            document_id=document_id,
+            document_type=doc.get("document_type"),
+        )
+    except Exception as exec_err:
+        logger.error(f"Vision fallback execution failed for {document_id}: {exec_err}")
+        try:
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="vision_fallback",
+                status="failed",
+                message=f"Vision fallback failed: {str(exec_err)}",
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Vision fallback execution failed: {str(exec_err)}"
+        )
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    # Persist updated fields in Supabase
+    if fallback_res.fields:
+        try:
+            supabase_service.save_validated_fields(document_id, fallback_res.fields)
+        except Exception as db_err:
+            logger.warning(f"Could not persist vision fallback fields in DB for {document_id}: {db_err}")
+
+    # Update document status if re-validated
+    if fallback_res.updated_validation:
+        final_status = fallback_res.updated_validation.document_status
+        try:
+            supabase_service.update_document_status(document_id, final_status)
+        except Exception as db_status_err:
+            logger.warning(f"Could not update document status to {final_status} for {document_id}: {db_status_err}")
+
+    # Record completion log
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="vision_fallback",
+            status="completed",
+            message=f"Vision fallback completed. Candidates: {fallback_res.candidates_identified}, Recovered: {fallback_res.fields_recovered}, Conflicts: {fallback_res.conflicts_detected}",
+            metadata={
+                "candidates_identified": fallback_res.candidates_identified,
+                "fields_recovered": fallback_res.fields_recovered,
+                "conflicts_detected": fallback_res.conflicts_detected,
+                "status": fallback_res.status,
+                "duration_ms": duration_ms,
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record completed vision fallback log for {document_id}: {log_err}")
+
+    return fallback_res
+
+
+@router.get("/{document_id}/vision-fallback", response_model=DocumentVisionFallbackResult)
+async def get_vision_fallback_endpoint(document_id: str) -> DocumentVisionFallbackResult:
+    """
+    Retrieve stored vision fallback results for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    fallback_json_path = os.path.join(target_dir, "vision_fallback.json")
+
+    if os.path.isfile(fallback_json_path):
+        try:
+            with open(fallback_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentVisionFallbackResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read vision_fallback.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored vision fallback result: {str(err)}"
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Vision fallback result not found for document '{document_id}'. Run POST /api/documents/{document_id}/vision-fallback first."
+    )
+
 

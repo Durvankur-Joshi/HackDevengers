@@ -7,6 +7,7 @@ from app.pipeline.types import (
     DocumentType,
     GeminiSectionDetectionOutput,
     GeminiRawSection,
+    GeminiVisionRecoveryOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,71 @@ class GeminiService:
         except Exception as e:
             logger.error(f"Gemini section extraction API request failed: {e}")
             raise GeminiServiceError(f"AI section extraction request failed: {str(e)}")
+
+    def recover_field_vision(
+        self,
+        image: Any,
+        prompt: str,
+        model: Optional[str] = None
+    ) -> GeminiVisionRecoveryOutput:
+        """
+        Execute targeted visual inspection on a cropped image snippet using Gemini Vision.
+        Uses response_schema=GeminiVisionRecoveryOutput with strict anti-hallucination controls.
+        """
+        client = self.get_client()
+        model_name = model or settings.GEMINI_MODEL
+
+        try:
+            from google.genai import types
+
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=GeminiVisionRecoveryOutput,
+                temperature=0.0,
+            )
+
+            logger.info(f"Calling Gemini Vision model '{model_name}' for targeted field recovery...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[image, prompt],
+                config=config,
+            )
+
+            raw_text = response.text
+            if not raw_text:
+                raise GeminiServiceError("Gemini Vision returned an empty response.")
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as json_err:
+                logger.error(f"Malformed JSON from Gemini Vision recovery: {raw_text}")
+                raise GeminiServiceError(f"Gemini Vision returned invalid JSON: {str(json_err)}")
+
+            # Ensure value is stripped if string
+            val = data.get("value")
+            if isinstance(val, str):
+                val = val.strip()
+                if not val or val.lower() in ("null", "none", "n/a", "unknown"):
+                    val = None
+            data["value"] = val
+
+            # Normalize confidence
+            conf = data.get("confidence")
+            if conf is not None:
+                try:
+                    conf = float(conf)
+                    conf = max(0.0, min(1.0, conf))
+                except (ValueError, TypeError):
+                    conf = None
+            data["confidence"] = conf
+
+            return GeminiVisionRecoveryOutput.model_validate(data)
+
+        except GeminiServiceError:
+            raise
+        except Exception as e:
+            logger.error(f"Gemini Vision recovery API request failed: {e}")
+            raise GeminiServiceError(f"AI vision recovery request failed: {str(e)}")
 
 
 gemini_service = GeminiService()

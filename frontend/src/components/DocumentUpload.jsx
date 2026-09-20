@@ -27,6 +27,8 @@ import {
   Boxes,
   ShieldCheck,
   CheckSquare,
+  Eye,
+  AlertTriangle,
 } from 'lucide-react';
 
 function formatSectionTitle(sectionName) {
@@ -98,6 +100,9 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [validationError, setValidationError] = useState(null);
+  const [recoveringVision, setRecoveringVision] = useState(false);
+  const [visionResult, setVisionResult] = useState(null);
+  const [visionError, setVisionError] = useState(null);
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
@@ -317,6 +322,28 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
+  const handleVisionFallback = async () => {
+    if (!uploadedDoc?.id) return;
+    setRecoveringVision(true);
+    setVisionError(null);
+
+    const result = await api.runVisionFallback(uploadedDoc.id);
+    setRecoveringVision(false);
+
+    if (result.ok && result.data) {
+      setVisionResult(result.data);
+      if (result.data.updated_validation) {
+        setValidationResult(result.data.updated_validation);
+        setUploadedDoc((prev) => ({
+          ...prev,
+          status: result.data.updated_validation.document_status,
+        }));
+      }
+    } else {
+      setVisionError(result.error || 'Vision fallback recovery failed.');
+    }
+  };
+
   const toggleSection = (idx) => {
     setExpandedSections((prev) => ({
       ...prev,
@@ -340,14 +367,17 @@ export default function DocumentUpload({ onUploadSuccess }) {
     setSectionsResult(null);
     setExtractionResult(null);
     setValidationResult(null);
+    setVisionResult(null);
     setRunningOcr(false);
     setClassifying(false);
     setDetectingSections(false);
     setExtracting(false);
     setValidating(false);
+    setRecoveringVision(false);
     setSectionsError(null);
     setExtractionError(null);
     setValidationError(null);
+    setVisionError(null);
     setExpandedSections({});
     setExpandedFields({});
     setOcrProgressText('');
@@ -366,7 +396,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
           </div>
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 9 Pipeline
+            Phase 10 Pipeline
           </Badge>
         </div>
         <CardDescription className="text-xs text-muted-foreground">
@@ -1085,6 +1115,125 @@ export default function DocumentUpload({ onUploadSuccess }) {
                 </div>
               )}
 
+              {/* Vision Fallback Error Banner */}
+              {visionError && (
+                <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-2.5 text-xs text-destructive flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{visionError}</span>
+                </div>
+              )}
+
+              {/* Phase 10: Vision Fallback Recovery Panel */}
+              {visionResult && (
+                <div className="rounded-lg border border-indigo-500/30 bg-indigo-950/20 p-3 text-xs font-mono space-y-2.5">
+                  <div className="flex items-center justify-between text-indigo-300 font-semibold border-b border-indigo-500/20 pb-2">
+                    <span className="flex items-center gap-1.5 text-indigo-300">
+                      <Eye className="h-4 w-4 text-indigo-400" /> Phase 10: Vision Recovery & Fallback
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] uppercase font-mono border-indigo-500/40 text-indigo-300 bg-indigo-500/10"
+                    >
+                      {visionResult.status}
+                    </Badge>
+                  </div>
+
+                  {/* Summary Metric Counters */}
+                  <div className="grid grid-cols-3 gap-2 py-0.5 text-center">
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Candidates</div>
+                      <div className="text-sm font-bold text-white">{visionResult.candidates_identified ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
+                      <div className="text-[10px] text-emerald-400/80 uppercase">Recovered</div>
+                      <div className="text-sm font-bold text-emerald-400">{visionResult.fields_recovered ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
+                      <div className="text-[10px] text-rose-400/80 uppercase">Conflicts</div>
+                      <div className="text-sm font-bold text-rose-400">{visionResult.conflicts_detected ?? 0}</div>
+                    </div>
+                  </div>
+
+                  {/* Fallback Outcomes List */}
+                  {visionResult.fallback_fields?.length > 0 ? (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="text-[11px] font-semibold text-slate-200">
+                        Evaluated Fields ({visionResult.fallback_fields.length})
+                      </div>
+                      <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                        {visionResult.fallback_fields.map((fb, idx) => {
+                          const action = fb.action_taken;
+                          const isRecovered = action === 'recovered';
+                          const isConflict = action === 'conflict';
+                          const isAgreed = action === 'agreed';
+
+                          const badgeColor = isRecovered
+                            ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                            : isAgreed
+                              ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
+                              : isConflict
+                                ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+                                : 'border-amber-500/50 bg-amber-500/10 text-amber-300';
+
+                          return (
+                            <div
+                              key={idx}
+                              className={`rounded bg-background/70 p-2 border text-[11px] space-y-1.5 ${
+                                isConflict
+                                  ? 'border-rose-500/40 bg-rose-950/10'
+                                  : isRecovered
+                                    ? 'border-emerald-500/40 bg-emerald-950/10'
+                                    : 'border-border/40'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-slate-200 truncate">
+                                  {formatFieldName(fb.field_name)}
+                                </span>
+                                <Badge variant="outline" className={`text-[9px] uppercase font-bold px-1.5 py-0.2 ${badgeColor}`}>
+                                  {action}
+                                </Badge>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                                <div className="rounded bg-background/60 p-1.5 border border-border/30">
+                                  <div className="text-[9px] text-muted-foreground uppercase flex justify-between">
+                                    <span>OCR Read:</span>
+                                    {fb.ocr_confidence != null && <span>{Math.round(fb.ocr_confidence * 100)}%</span>}
+                                  </div>
+                                  <span className="text-slate-300 break-all">
+                                    {fb.ocr_value != null ? String(fb.ocr_value) : <span className="italic text-muted-foreground">null</span>}
+                                  </span>
+                                </div>
+                                <div className="rounded bg-background/60 p-1.5 border border-border/30">
+                                  <div className="text-[9px] text-indigo-400 uppercase flex justify-between">
+                                    <span>Vision Read:</span>
+                                    {fb.vision_confidence != null && <span>{Math.round(fb.vision_confidence * 100)}%</span>}
+                                  </div>
+                                  <span className="text-indigo-200 break-all font-medium">
+                                    {fb.vision_value != null ? String(fb.vision_value) : <span className="italic text-muted-foreground">null</span>}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {fb.reason && (
+                                <div className="text-[10px] text-slate-400 italic">
+                                  Reason: {fb.reason}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground italic text-center py-1">
+                      All fields satisfied confidence thresholds. No targeted vision recovery required.
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
                 <div className="flex items-center justify-between">
                   <span>Document ID:</span>
@@ -1250,12 +1399,30 @@ export default function DocumentUpload({ onUploadSuccess }) {
                     )}
                   </Button>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={handleVisionFallback}
+                      disabled={recoveringVision || validating}
+                      className="text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20 cursor-pointer"
+                    >
+                      {recoveringVision ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Recovering...
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="h-3.5 w-3.5" />
+                          Recover Low-Confidence
+                        </>
+                      )}
+                    </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={handleValidate}
-                      disabled={validating}
+                      disabled={validating || recoveringVision}
                       className="text-xs gap-1 border-emerald-500/30 text-emerald-300 hover:bg-emerald-950/30 cursor-pointer"
                     >
                       {validating ? (

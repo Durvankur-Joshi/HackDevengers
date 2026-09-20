@@ -224,6 +224,9 @@ class DocumentValidator:
             },
         )
 
+    # Alias for convenience and downstream pipelines
+    validate_document = normalize_and_validate
+
     def _detect_conflicts(self, fields: List[ExtractedField]):
         """
         Identifies fields with the same logical field_name having differing normalized values.
