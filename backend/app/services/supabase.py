@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -132,8 +132,25 @@ class SupabaseService:
             res = client.table("documents").update(payload).eq("id", document_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
-            return None
         except Exception as e:
+            # If 'extracted' was rejected by an un-migrated DB check constraint, fallback to 'sectioned'
+            if status == "extracted":
+                logger.warning(f"Status 'extracted' rejected ({e}); falling back to 'sectioned'")
+                try:
+                    res = client.table("documents").update({"status": "sectioned"}).eq("id", document_id).execute()
+                    if res.data and len(res.data) > 0:
+                        return res.data[0]
+                except Exception:
+                    pass
+            # If 'sectioned' was rejected by an un-migrated DB check constraint, fallback to 'classified'
+            if status == "sectioned":
+                logger.warning(f"Status 'sectioned' rejected ({e}); falling back to 'classified'")
+                try:
+                    res = client.table("documents").update({"status": "classified"}).eq("id", document_id).execute()
+                    if res.data and len(res.data) > 0:
+                        return res.data[0]
+                except Exception:
+                    pass
             # If 'ocr_completed' was rejected by an un-migrated DB check constraint, fallback to 'ocr'
             if status == "ocr_completed":
                 logger.warning(f"Status 'ocr_completed' rejected ({e}); falling back to 'ocr'")
@@ -144,6 +161,140 @@ class SupabaseService:
                 except Exception:
                     pass
             raise e
+
+    def insert_document_sections(
+        self,
+        document_id: str,
+        sections: List[Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Store detected document sections in the existing document_sections table.
+        Idempotent: removes any previous sections for this document before inserting.
+        """
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            client.table("document_sections").delete().eq("document_id", document_id).execute()
+        except Exception as err:
+            logger.warning(f"Could not clear prior sections for {document_id}: {err}")
+
+        if not sections:
+            return []
+
+        payloads = []
+        for s in sections:
+            sec_name = s.section_name if hasattr(s, "section_name") else s.get("section_name", "unknown")
+            raw_text = s.text if hasattr(s, "text") else s.get("text", "")
+            page_num = s.page_number if hasattr(s, "page_number") else s.get("page_number", 1)
+            conf = s.confidence if hasattr(s, "confidence") else s.get("confidence", 0.0)
+
+            payloads.append({
+                "document_id": document_id,
+                "section_name": sec_name,
+                "raw_text": raw_text,
+                "page_number": page_num,
+                "confidence": round(float(conf), 4),
+            })
+
+        try:
+            res = client.table("document_sections").insert(payloads).execute()
+            return res.data or []
+        except Exception as e:
+            logger.error(f"Failed to insert document sections into Supabase: {e}")
+            raise
+
+    def get_document_sections(self, document_id: str) -> List[Dict[str, Any]]:
+        """Retrieve stored document sections for a document from Supabase."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("document_sections").select("*").eq("document_id", document_id).order("page_number").execute()
+            return res.data or []
+        except Exception as e:
+            logger.warning(f"Error querying document_sections for {document_id}: {e}")
+            return []
+
+    def insert_extracted_fields(
+        self,
+        document_id: str,
+        fields: List[Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Store extracted fields into the existing extracted_fields table.
+        Idempotent: removes any previous extracted fields for this document before inserting.
+        """
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            client.table("extracted_fields").delete().eq("document_id", document_id).execute()
+        except Exception as err:
+            logger.warning(f"Could not clear prior extracted fields for {document_id}: {err}")
+
+        if not fields:
+            return []
+
+        payloads = []
+        for f in fields:
+            fname = f.field_name if hasattr(f, "field_name") else f.get("field_name")
+            fval = f.field_value if hasattr(f, "field_value") else f.get("field_value")
+            fconf = f.confidence if hasattr(f, "confidence") else f.get("confidence")
+            fsrc = f.source if hasattr(f, "source") else f.get("source", "gemini")
+            fsrc_txt = f.source_text if hasattr(f, "source_text") else f.get("source_text")
+
+            fsec = f.section_id if hasattr(f, "section_id") else f.get("section_id")
+            sec_uuid = None
+            if fsec:
+                try:
+                    uuid.UUID(str(fsec))
+                    sec_uuid = str(fsec)
+                except (ValueError, TypeError):
+                    sec_uuid = None
+
+            payload = {
+                "document_id": document_id,
+                "field_name": str(fname),
+                "field_value": val_str,
+                "confidence": conf_num,
+                "source": valid_src,
+                "source_text": fsrc_txt,
+            }
+            if sec_uuid:
+                payload["section_id"] = sec_uuid
+            payloads.append(payload)
+
+        try:
+            res = client.table("extracted_fields").insert(payloads).execute()
+            return res.data or []
+        except Exception as e:
+            # If failed due to FK constraint on section_id, retry without section_id
+            logger.warning(f"Insert with section_id failed ({e}), attempting fallback without section_id...")
+            for p in payloads:
+                p.pop("section_id", None)
+            try:
+                res = client.table("extracted_fields").insert(payloads).execute()
+                return res.data or []
+            except Exception as e2:
+                logger.error(f"Failed to insert extracted fields into Supabase: {e2}")
+                raise
+
+    def get_extracted_fields(self, document_id: str) -> List[Dict[str, Any]]:
+        """Retrieve stored extracted fields for a document from Supabase."""
+        client = self.get_client()
+        if not client:
+            raise RuntimeError("Supabase client is not configured.")
+
+        try:
+            res = client.table("extracted_fields").select("*").eq("document_id", document_id).execute()
+            return res.data or []
+        except Exception as e:
+            logger.warning(f"Error querying extracted_fields for {document_id}: {e}")
+            return []
 
     def create_processing_log(
         self,

@@ -246,6 +246,86 @@ export class ApiService {
       return { ok: false, error: err.message || 'Network error retrieving classification.' };
     }
   }
+
+  /**
+   * Execute Phase 7 logical section detection via Gemini
+   * @param {string} documentId
+   */
+  async detectSections(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/detect-sections`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Section detection failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during section detection.' };
+    }
+  }
+
+  /**
+   * Retrieve cached section detection results for an existing document
+   * @param {string} documentId
+   */
+  async getSections(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/sections`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load sections.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving sections.' };
+    }
+  }
+
+  /**
+   * Execute Phase 8 targeted structured AI extraction via Gemini
+   * @param {string} documentId
+   */
+  async extractFields(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/extract`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Field extraction failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during structured extraction.' };
+    }
+  }
+
+  /**
+   * Retrieve cached extraction results for an existing document
+   * @param {string} documentId
+   */
+  async getExtraction(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/extraction`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load extraction results.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving extraction results.' };
+    }
+  }
 }
 
 export const api = new ApiService();

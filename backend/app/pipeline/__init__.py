@@ -10,6 +10,14 @@ from app.pipeline.types import (
     DocumentType,
     GeminiClassificationOutput,
     DocumentClassificationResult,
+    InvoiceSectionType,
+    OnboardingSectionType,
+    GeminiRawSection,
+    GeminiSectionDetectionOutput,
+    DocumentSection,
+    DocumentSectionResult,
+    ExtractedField,
+    DocumentExtractionResult,
 )
 from app.pipeline.preprocessing import preprocess_document
 from app.pipeline.ocr import (
@@ -20,6 +28,8 @@ from app.pipeline.ocr import (
     get_ocr_engine,
 )
 from app.pipeline.classifier import DocumentClassifier, classify_document
+from app.pipeline.section_detector import SectionDetector, detect_sections_for_document
+from app.pipeline.extractor import DocumentExtractor, extract_document_fields
 
 __all__ = [
     "PreprocessedPage",
@@ -33,6 +43,14 @@ __all__ = [
     "DocumentType",
     "GeminiClassificationOutput",
     "DocumentClassificationResult",
+    "InvoiceSectionType",
+    "OnboardingSectionType",
+    "GeminiRawSection",
+    "GeminiSectionDetectionOutput",
+    "DocumentSection",
+    "DocumentSectionResult",
+    "ExtractedField",
+    "DocumentExtractionResult",
     "BaseOCREngine",
     "TesseractOCREngine",
     "OCREngineError",
@@ -40,4 +58,8 @@ __all__ = [
     "get_ocr_engine",
     "DocumentClassifier",
     "classify_document",
+    "SectionDetector",
+    "detect_sections_for_document",
+    "DocumentExtractor",
+    "extract_document_fields",
 ]

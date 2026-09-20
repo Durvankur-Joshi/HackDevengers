@@ -21,7 +21,30 @@ import {
   FileSpreadsheet,
   UserCheck,
   HelpCircle,
+  FolderTree,
+  ChevronDown,
+  ChevronRight,
+  Boxes,
 } from 'lucide-react';
+
+function formatSectionTitle(sectionName) {
+  if (!sectionName) return 'Unknown Section';
+  return sectionName
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function formatFieldName(fieldName) {
+  if (!fieldName) return '';
+  return fieldName
+    .replace(/^line_item_\d+_/, '')
+    .replace(/^id_doc_\d+_/, '')
+    .replace(/^agreement_\d+_/, '')
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
 
 const MAX_FILE_SIZE_MB = 10;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
@@ -62,6 +85,14 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [viewMode, setViewMode] = useState('full');
   const [classifying, setClassifying] = useState(false);
   const [classificationResult, setClassificationResult] = useState(null);
+  const [detectingSections, setDetectingSections] = useState(false);
+  const [sectionsResult, setSectionsResult] = useState(null);
+  const [sectionsError, setSectionsError] = useState(null);
+  const [expandedSections, setExpandedSections] = useState({});
+  const [extracting, setExtracting] = useState(false);
+  const [extractionResult, setExtractionResult] = useState(null);
+  const [extractionError, setExtractionError] = useState(null);
+  const [expandedFields, setExpandedFields] = useState({});
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
@@ -222,14 +253,76 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
+  const handleDetectSections = async () => {
+    if (!uploadedDoc?.id) return;
+    setDetectingSections(true);
+    setSectionsError(null);
+
+    const result = await api.detectSections(uploadedDoc.id);
+    setDetectingSections(false);
+
+    if (result.ok && result.data) {
+      setSectionsResult(result.data);
+      setUploadedDoc((prev) => ({
+        ...prev,
+        status: 'sectioned',
+      }));
+    } else {
+      setSectionsError(result.error || 'Section detection failed.');
+    }
+  };
+
+  const handleExtractFields = async () => {
+    if (!uploadedDoc?.id) return;
+    setExtracting(true);
+    setExtractionError(null);
+
+    const result = await api.extractFields(uploadedDoc.id);
+    setExtracting(false);
+
+    if (result.ok && result.data) {
+      setExtractionResult(result.data);
+      if (result.data.status !== 'skipped') {
+        setUploadedDoc((prev) => ({
+          ...prev,
+          status: 'extracted',
+        }));
+      }
+    } else {
+      setExtractionError(result.error || 'Structured field extraction failed.');
+    }
+  };
+
+  const toggleSection = (idx) => {
+    setExpandedSections((prev) => ({
+      ...prev,
+      [idx]: !prev[idx],
+    }));
+  };
+
+  const toggleField = (key) => {
+    setExpandedFields((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
   const handleReset = () => {
     setSelectedFile(null);
     setUploadedDoc(null);
     setPreprocessResult(null);
     setOcrResult(null);
     setClassificationResult(null);
+    setSectionsResult(null);
+    setExtractionResult(null);
     setRunningOcr(false);
     setClassifying(false);
+    setDetectingSections(false);
+    setExtracting(false);
+    setSectionsError(null);
+    setExtractionError(null);
+    setExpandedSections({});
+    setExpandedFields({});
     setOcrProgressText('');
     setError(null);
     if (inputRef.current) {
@@ -246,7 +339,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
           </div>
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 3 Pipeline
+            Phase 8 Pipeline
           </Badge>
         </div>
         <CardDescription className="text-xs text-muted-foreground">
@@ -265,21 +358,29 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
         {/* Pipeline Step Progress Indicator */}
         {uploadedDoc && (
-          <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 px-3.5 py-2 text-[11px] font-mono">
-            <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+          <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 px-3 py-2 text-[11px] font-mono overflow-x-auto gap-1">
+            <div className="flex items-center gap-1 text-emerald-400 font-semibold shrink-0">
               <CheckCircle2 className="h-3.5 w-3.5" /> Upload
             </div>
-            <span className="text-muted-foreground/60">→</span>
-            <div className={`flex items-center gap-1.5 ${preprocessResult ? 'text-emerald-400 font-semibold' : 'text-muted-foreground'}`}>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${preprocessResult ? 'text-emerald-400 font-semibold' : 'text-muted-foreground'}`}>
               {preprocessResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />} Preprocess
             </div>
-            <span className="text-muted-foreground/60">→</span>
-            <div className={`flex items-center gap-1.5 ${ocrResult ? 'text-emerald-400 font-semibold' : (preprocessResult ? 'text-blue-400 font-semibold' : 'text-muted-foreground')}`}>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${ocrResult ? 'text-emerald-400 font-semibold' : (preprocessResult ? 'text-blue-400 font-semibold' : 'text-muted-foreground')}`}>
               {ocrResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${preprocessResult ? 'bg-blue-400' : 'bg-slate-600'}`} />} OCR
             </div>
-            <span className="text-muted-foreground/60">→</span>
-            <div className={`flex items-center gap-1.5 ${classificationResult ? 'text-emerald-400 font-semibold' : (ocrResult ? 'text-purple-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${classificationResult ? 'text-emerald-400 font-semibold' : (ocrResult ? 'text-purple-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
               {classificationResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${ocrResult ? 'bg-purple-400' : 'bg-slate-600'}`} />} Classify
+            </div>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${sectionsResult ? 'text-emerald-400 font-semibold' : (classificationResult ? (classificationResult.document_type === 'unknown' ? 'text-muted-foreground' : 'text-amber-400 font-semibold animate-pulse') : 'text-muted-foreground')}`}>
+              {sectionsResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${classificationResult && classificationResult.document_type !== 'unknown' ? 'bg-amber-400' : 'bg-slate-600'}`} />} Sections
+            </div>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${extractionResult ? (extractionResult.status === 'skipped' ? 'text-amber-400 font-semibold' : 'text-emerald-400 font-semibold') : (sectionsResult ? 'text-cyan-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
+              {extractionResult ? (extractionResult.status === 'skipped' ? <AlertCircle className="h-3.5 w-3.5 text-amber-400" /> : <CheckCircle2 className="h-3.5 w-3.5" />) : <span className={`h-1.5 w-1.5 rounded-full ${sectionsResult ? 'bg-cyan-400' : 'bg-slate-600'}`} />} Extract
             </div>
           </div>
         )}
@@ -291,20 +392,30 @@ export default function DocumentUpload({ onUploadSuccess }) {
               <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold">
                 <CheckCircle2 className="h-4 w-4" />
                 <span>
-                  {preprocessResult
-                    ? "Document prepared for OCR"
-                    : "Document uploaded successfully"}
+                  {extractionResult
+                    ? (extractionResult.status === 'skipped' ? "Extraction skipped (Unknown archetype)" : "Fields extracted successfully")
+                    : sectionsResult
+                      ? "Sections detected"
+                      : classificationResult
+                        ? "Document classified"
+                        : preprocessResult
+                          ? "Document prepared for OCR"
+                          : "Document uploaded successfully"}
                 </span>
               </div>
               <Badge
                 variant={
-                  uploadedDoc.status === "classified"
-                    ? "default"
-                    : uploadedDoc.status === "ocr_completed"
-                      ? "success"
-                      : uploadedDoc.status === "preprocessed"
-                        ? "secondary"
-                        : "outline"
+                  uploadedDoc.status === "extracted"
+                    ? "success"
+                    : uploadedDoc.status === "sectioned"
+                      ? "warning"
+                      : uploadedDoc.status === "classified"
+                        ? "default"
+                        : uploadedDoc.status === "ocr_completed"
+                          ? "success"
+                          : uploadedDoc.status === "preprocessed"
+                            ? "secondary"
+                            : "outline"
                 }
                 className="capitalize text-xs font-mono"
               >
@@ -498,6 +609,273 @@ export default function DocumentUpload({ onUploadSuccess }) {
                 </div>
               )}
 
+              {/* Sections Detection Error */}
+              {sectionsError && (
+                <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                  <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex-1">{sectionsError}</div>
+                </div>
+              )}
+
+              {/* Section Detection Results Card */}
+              {sectionsResult && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FolderTree className="h-4 w-4 text-amber-400" />
+                      <span className="text-xs font-semibold text-white">Document Sections</span>
+                    </div>
+                    <Badge
+                      variant="warning"
+                      className="text-[11px] font-mono px-2 py-0.5"
+                    >
+                      {sectionsResult.sections?.length || 0} Sections Found
+                    </Badge>
+                  </div>
+
+                  {sectionsResult.sections?.length === 0 ? (
+                    <div className="rounded-lg bg-background/50 border border-border/40 p-3 text-center text-xs text-muted-foreground">
+                      No logical sections extracted for this document archetype ({sectionsResult.document_type || "unknown"}).
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {sectionsResult.sections.map((section, idx) => {
+                        const isExpanded = !!expandedSections[idx];
+                        return (
+                          <div
+                            key={section.section_id || idx}
+                            className="rounded-lg border border-border/50 bg-background/60 overflow-hidden transition-colors hover:border-amber-500/40"
+                          >
+                            {/* Accordion Header */}
+                            <button
+                              type="button"
+                              onClick={() => toggleSection(idx)}
+                              className="w-full flex items-center justify-between p-2.5 text-left text-xs hover:bg-white/5 transition-colors cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2 font-medium text-slate-200">
+                                {isExpanded ? (
+                                  <ChevronDown className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                                ) : (
+                                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                )}
+                                <span className="font-semibold text-white">
+                                  {formatSectionTitle(section.section_name)}
+                                </span>
+                                <span className="text-[10px] font-mono text-muted-foreground">
+                                  (Page {section.page_number})
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {section.block_ids?.length > 0 && (
+                                  <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.5 rounded bg-muted/40">
+                                    {section.block_ids.length} blocks
+                                  </span>
+                                )}
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] font-mono border-amber-500/30 text-amber-300 py-0"
+                                >
+                                  {Math.round((section.confidence || 0) * 100)}%
+                                </Badge>
+                              </div>
+                            </button>
+
+                            {/* Accordion Body */}
+                            {isExpanded && (
+                              <div className="p-3 pt-1 border-t border-border/40 bg-background/80 space-y-2">
+                                <div className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap rounded bg-muted/30 p-2.5 max-h-48 overflow-y-auto leading-relaxed">
+                                  {section.text || "No text in section"}
+                                </div>
+                                {section.bbox && (
+                                  <div className="text-[10px] font-mono text-muted-foreground">
+                                    BBox: [x={section.bbox.x}, y={section.bbox.y}, {section.bbox.width}x{section.bbox.height}]
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Extraction Error */}
+              {extractionError && (
+                <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                  <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex-1">{extractionError}</div>
+                </div>
+              )}
+
+              {/* Extraction Results Card */}
+              {extractionResult && (
+                <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 p-3.5 space-y-3">
+                  <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-cyan-400" />
+                      <span className="text-xs font-semibold text-white">Targeted AI Extraction</span>
+                    </div>
+                    <Badge
+                      variant={extractionResult.status === "skipped" ? "outline" : "success"}
+                      className={`text-[11px] font-mono px-2 py-0.5 ${extractionResult.status === "skipped" ? "border-amber-500/40 text-amber-300" : "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"}`}
+                    >
+                      {extractionResult.status === "skipped"
+                        ? "Skipped"
+                        : `${extractionResult.field_count || extractionResult.fields?.length || 0} Fields Extracted`}
+                    </Badge>
+                  </div>
+
+                  {extractionResult.status === "skipped" ? (
+                    <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-300 space-y-1">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <AlertCircle className="h-4 w-4" />
+                        Structured Extraction Skipped
+                      </div>
+                      <p className="text-[11px] text-amber-200/80">
+                        {extractionResult.reason || "Document archetype is unknown. Extraction requires a recognized document schema (Invoice or Onboarding Form)."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {/* Extraction Meta Summary */}
+                      <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
+                        <div className="rounded bg-background/60 p-2 border border-border/40">
+                          <div className="text-[10px] text-muted-foreground uppercase">Fields Extracted</div>
+                          <div className="text-sm font-bold text-cyan-300">
+                            {extractionResult.field_count || extractionResult.fields?.length || 0}
+                          </div>
+                        </div>
+                        <div className="rounded bg-background/60 p-2 border border-border/40">
+                          <div className="text-[10px] text-muted-foreground uppercase">Sections Targeted</div>
+                          <div className="text-sm font-bold text-white">
+                            {Object.keys(extractionResult.section_data || {}).length}
+                          </div>
+                        </div>
+                        <div className="rounded bg-background/60 p-2 border border-border/40">
+                          <div className="text-[10px] text-muted-foreground uppercase">Model</div>
+                          <div className="text-xs font-bold text-emerald-400 truncate mt-0.5">
+                            {extractionResult.metadata?.model || 'Gemini 2.5'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Extracted Fields List with Provenance */}
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                        {(extractionResult.fields || []).map((field, idx) => {
+                          const isExpanded = !!expandedFields[idx];
+                          const isNull = field.field_value === null || field.field_value === undefined;
+                          return (
+                            <div
+                              key={idx}
+                              className="rounded-lg border border-border/50 bg-background/60 p-2.5 space-y-1.5 transition-colors hover:border-cyan-500/30"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleField(idx)}
+                                    className="text-muted-foreground hover:text-white transition-colors cursor-pointer"
+                                    title="Toggle provenance details"
+                                  >
+                                    {isExpanded ? (
+                                      <ChevronDown className="h-3.5 w-3.5 text-cyan-400" />
+                                    ) : (
+                                      <ChevronRight className="h-3.5 w-3.5" />
+                                    )}
+                                  </button>
+                                  <span className="text-xs font-semibold text-white truncate">
+                                    {formatFieldName(field.field_name)}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.2 rounded bg-muted/40 shrink-0">
+                                    {field.section_name}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  {field.confidence != null ? (
+                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                      {Math.round(field.confidence * 100)}%
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-mono text-muted-foreground">N/A</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="pl-5 text-xs">
+                                {isNull ? (
+                                  <span className="text-muted-foreground italic font-mono text-[11px]">
+                                    null (strict null policy)
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-100 font-mono text-[11px] break-all">
+                                    {String(field.field_value)}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Provenance Details */}
+                              {isExpanded && (
+                                <div className="mt-2 ml-5 p-2 rounded bg-muted/30 border border-border/30 text-[10px] font-mono text-muted-foreground space-y-1">
+                                  <div>
+                                    <span className="text-slate-400">Field Key:</span> {field.field_name}
+                                  </div>
+                                  <div>
+                                    <span className="text-slate-400">Source:</span> {field.source || 'gemini'} (Page {field.page_number || 1})
+                                  </div>
+                                  {field.source_text && (
+                                    <div>
+                                      <span className="text-slate-400">Source Text Excerpt:</span>
+                                      <div className="mt-0.5 p-1.5 rounded bg-background/80 text-slate-300 italic whitespace-pre-wrap">
+                                        &quot;{field.source_text}&quot;
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Line Items Table if invoice line items exist */}
+                      {extractionResult.section_data?.line_items?.items?.length > 0 && (
+                        <div className="pt-2 border-t border-border/40 space-y-1.5">
+                          <div className="text-[11px] font-semibold text-cyan-300 flex items-center gap-1.5">
+                            <FileSpreadsheet className="h-3.5 w-3.5" />
+                            Extracted Line Items ({extractionResult.section_data.line_items.items.length})
+                          </div>
+                          <div className="overflow-x-auto rounded border border-border/40 bg-background/40">
+                            <table className="w-full text-left text-[11px] font-mono">
+                              <thead>
+                                <tr className="border-b border-border/40 text-muted-foreground bg-muted/20">
+                                  <th className="p-1.5">Description</th>
+                                  <th className="p-1.5 text-right">Qty</th>
+                                  <th className="p-1.5 text-right">Unit Price</th>
+                                  <th className="p-1.5 text-right">Total</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {extractionResult.section_data.line_items.items.map((item, i) => (
+                                  <tr key={i} className="border-b border-border/20 last:border-0 hover:bg-white/5">
+                                    <td className="p-1.5 text-slate-200">{item.description || '—'}</td>
+                                    <td className="p-1.5 text-right text-slate-300">{item.quantity ?? '—'}</td>
+                                    <td className="p-1.5 text-right text-slate-300">{item.unit_price != null ? `$${item.unit_price}` : '—'}</td>
+                                    <td className="p-1.5 text-right font-semibold text-cyan-400">{item.total_amount != null ? `$${item.total_amount}` : '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
                 <div className="flex items-center justify-between">
                   <span>Document ID:</span>
@@ -543,7 +921,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   </Button>
                 )}
 
-                {uploadedDoc.status !== "preprocessed" && uploadedDoc.status !== "ocr_completed" && uploadedDoc.status !== "classified" && !preprocessResult ? (
+                {uploadedDoc.status !== "preprocessed" && uploadedDoc.status !== "ocr_completed" && uploadedDoc.status !== "classified" && uploadedDoc.status !== "sectioned" && uploadedDoc.status !== "extracted" && !preprocessResult ? (
                   <Button
                     size="sm"
                     onClick={handlePreprocess}
@@ -600,10 +978,53 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       </>
                     )}
                   </Button>
+                ) : classificationResult.document_type === "unknown" ? (
+                  <Badge variant="outline" className="text-xs gap-1 py-1 px-2.5 border-amber-500/40 text-amber-300">
+                    <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
+                    Sections & Extraction Skipped (Unknown Type)
+                  </Badge>
+                ) : !sectionsResult ? (
+                  <Button
+                    size="sm"
+                    onClick={handleDetectSections}
+                    disabled={detectingSections}
+                    className="text-xs gap-1.5 bg-amber-600 hover:bg-amber-500 text-white shadow-md shadow-amber-500/20 cursor-pointer"
+                  >
+                    {detectingSections ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Detecting Sections...
+                      </>
+                    ) : (
+                      <>
+                        <FolderTree className="h-3.5 w-3.5" />
+                        Detect Sections
+                      </>
+                    )}
+                  </Button>
+                ) : !extractionResult ? (
+                  <Button
+                    size="sm"
+                    onClick={handleExtractFields}
+                    disabled={extracting}
+                    className="text-xs gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-white shadow-md shadow-cyan-500/20 cursor-pointer"
+                  >
+                    {extracting ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Extracting structured information...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Extract Information
+                      </>
+                    )}
+                  </Button>
                 ) : (
-                  <Badge variant="default" className="text-xs gap-1 py-1 px-2.5 bg-purple-600/20 border-purple-500/40 text-purple-300">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-purple-400" />
-                    Classified
+                  <Badge variant="success" className="text-xs gap-1 py-1 px-2.5 bg-cyan-600/20 border-cyan-500/40 text-cyan-300">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-cyan-400" />
+                    Fields Extracted
                   </Badge>
                 )}
               </div>

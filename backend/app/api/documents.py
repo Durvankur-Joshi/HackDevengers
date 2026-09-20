@@ -4,6 +4,7 @@ import uuid
 import logging
 import glob
 import json
+import time
 from typing import Optional, List
 from PIL import Image
 from fastapi import APIRouter, UploadFile, File, HTTPException, status
@@ -13,9 +14,15 @@ from app.pipeline.types import (
     OCRDocumentResult,
     PreprocessedPage,
     DocumentClassificationResult,
+    DocumentSection,
+    DocumentSectionResult,
+    ExtractedField,
+    DocumentExtractionResult,
 )
 from app.pipeline.ocr import get_ocr_engine, OCREngineUnavailableError, OCREngineError
 from app.pipeline.classifier import classify_document
+from app.pipeline.section_detector import detect_sections_for_document
+from app.pipeline.extractor import extract_document_fields
 from app.pipeline.preprocessing import BASE_TMP_DIR
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
@@ -690,3 +697,498 @@ async def get_document_classification_endpoint(document_id: str) -> DocumentClas
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to parse stored classification result: {str(err)}"
         )
+
+
+# ==============================================================================
+# Phase 7 — Section Detection Endpoints
+# ==============================================================================
+
+@router.post("/{document_id}/detect-sections", response_model=DocumentSectionResult)
+async def detect_document_sections_endpoint(document_id: str) -> DocumentSectionResult:
+    """
+    Execute Phase 7 logical section detection:
+    1. Validate document exists and is accessible.
+    2. Ensure OCR result exists (ocr.json).
+    3. Ensure classification result exists (classification.json or document_type in DB).
+    4. If document_type == 'unknown', returns empty sections [] without calling Gemini.
+    5. Invoke SectionDetector with structure-only prompt.
+    6. Validate section names against supported whitelists.
+    7. Persist detected sections in Supabase document_sections table.
+    8. Update document status to 'sectioned' and create audit logs.
+    9. Return DocumentSectionResult.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured. Please set SUPABASE credentials."
+        )
+
+    # 1. Fetch document record
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+
+    # 2. Check OCR precondition
+    ocr_json_path = os.path.join(target_dir, "ocr.json")
+    if not os.path.isfile(ocr_json_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"OCR has not been run for document '{document_id}'. Run POST /api/documents/{document_id}/ocr first."
+        )
+
+    try:
+        with open(ocr_json_path, "r", encoding="utf-8") as f:
+            ocr_data = json.load(f)
+        ocr_result = OCRDocumentResult.model_validate(ocr_data)
+    except Exception as err:
+        logger.error(f"Failed to read ocr.json for {document_id}: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load OCR data: {str(err)}"
+        )
+
+    # 3. Check Classification precondition
+    classification_json_path = os.path.join(target_dir, "classification.json")
+    classification_type = "unknown"
+
+    if os.path.isfile(classification_json_path):
+        try:
+            with open(classification_json_path, "r", encoding="utf-8") as f:
+                class_data = json.load(f)
+            classification_type = class_data.get("document_type", "unknown")
+        except Exception:
+            classification_type = doc.get("document_type") or "unknown"
+    elif doc.get("document_type"):
+        classification_type = doc.get("document_type")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Document '{document_id}' has not been classified yet. Run POST /api/documents/{document_id}/classify first."
+        )
+
+    # 4. Record audit log: started
+    try:
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="section_detection",
+            status="started",
+            message="Section detection started",
+            metadata={"document_type": classification_type}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record section detection started log for {document_id}: {log_err}")
+
+    # 5. Run Section Detection
+    try:
+        section_result = detect_sections_for_document(ocr_result, classification_type)
+    except GeminiNotConfiguredError as cfg_err:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(cfg_err)
+        )
+    except GeminiServiceError as gem_err:
+        err_msg = f"AI section detection failed: {str(gem_err)}"
+        logger.error(f"Gemini section detection error for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="section_detection",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=err_msg
+        )
+    except Exception as general_err:
+        err_msg = f"Section detection processing error: {str(general_err)}"
+        logger.error(f"Unexpected error detecting sections for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="section_detection",
+                status="failed",
+                message=err_msg
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during section detection. Please check server logs."
+        )
+
+    # 6. Save detected sections in Supabase document_sections table
+    try:
+        supabase_service.insert_document_sections(document_id, section_result.sections)
+    except Exception as db_sec_err:
+        logger.warning(f"Failed to insert sections into document_sections table for {document_id}: {db_sec_err}")
+
+    # 7. Update documents table in PostgreSQL: status='sectioned'
+    try:
+        supabase_service.update_document_status(
+            document_id=document_id,
+            status="sectioned"
+        )
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="section_detection",
+            status="completed",
+            message="Section detection completed successfully",
+            metadata={
+                "section_count": len(section_result.sections),
+                "document_type": section_result.document_type,
+            }
+        )
+    except Exception as db_err:
+        logger.warning(f"Failed to update document status to sectioned for {document_id}: {db_err}")
+
+    return section_result
+
+
+@router.get("/{document_id}/sections", response_model=DocumentSectionResult)
+async def get_document_sections_endpoint(document_id: str) -> DocumentSectionResult:
+    """
+    Retrieve stored section detection results for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    sections_json_path = os.path.join(target_dir, "sections.json")
+
+    if os.path.isfile(sections_json_path):
+        try:
+            with open(sections_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentSectionResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read sections.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored sections: {str(err)}"
+            )
+
+    # Fallback to database query if artifact not on local disk
+    db_sections = supabase_service.get_document_sections(document_id)
+    if db_sections:
+        sections_list = [
+            DocumentSection(
+                section_id=s.get("id") or str(uuid.uuid4()),
+                document_id=document_id,
+                section_name=s.get("section_name", "unknown"),
+                page_number=s.get("page_number", 1),
+                text=s.get("raw_text", ""),
+                confidence=float(s.get("confidence", 0.0) or 0.0),
+                block_ids=[],
+                bbox=None,
+            )
+            for s in db_sections
+        ]
+        return DocumentSectionResult(
+            document_id=document_id,
+            document_type=doc.get("document_type") or "unknown",
+            sections=sections_list,
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Section detection result not found for document '{document_id}'. Run POST /api/documents/{document_id}/detect-sections first."
+    )
+
+
+# ==============================================================================
+# Phase 8 — Targeted Structured AI Extraction Endpoints
+# ==============================================================================
+
+@router.post("/{document_id}/extract", response_model=DocumentExtractionResult)
+async def extract_document_fields_endpoint(document_id: str) -> DocumentExtractionResult:
+    """
+    Execute Phase 8 targeted structured AI extraction:
+    1. Validate document exists.
+    2. Check classification & sections preconditions.
+    3. If document_type == 'unknown', returns skipped payload without invoking Gemini.
+    4. Performs targeted section extraction using Gemini with section-specific schemas.
+    5. Preserves field-level confidence, source text, and provenance.
+    6. Persists fields in Supabase extracted_fields table and saves extraction.json artifact.
+    7. Updates document status to 'extracted'.
+    8. Records audit logs in processing_logs table.
+    9. Returns DocumentExtractionResult.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured. Please set SUPABASE credentials."
+        )
+
+    # 1. Fetch document record
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+
+    # Precondition 1: OCR must be completed
+    ocr_json_path = os.path.join(target_dir, "ocr.json")
+    if not os.path.isfile(ocr_json_path) and doc.get("status") not in ("ocr_completed", "classified", "sectioned", "extracting", "extracted"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must complete OCR before extraction."
+        )
+
+    # Precondition 2: Classification must be completed
+    classification_json_path = os.path.join(target_dir, "classification.json")
+    if not os.path.isfile(classification_json_path) and not doc.get("document_type"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document must be classified before extraction."
+        )
+
+    # Precondition 3: Sections must be detected
+    sections_json_path = os.path.join(target_dir, "sections.json")
+    section_result: Optional[DocumentSectionResult] = None
+    if os.path.isfile(sections_json_path):
+        try:
+            with open(sections_json_path, "r", encoding="utf-8") as f:
+                sec_data = json.load(f)
+            section_result = DocumentSectionResult.model_validate(sec_data)
+        except Exception as err:
+            logger.warning(f"Could not parse local sections.json for {document_id}: {err}")
+
+    if not section_result:
+        # Fallback to database
+        db_sections = supabase_service.get_document_sections(document_id)
+        doc_type = doc.get("document_type") or "unknown"
+        if db_sections or doc_type == "unknown" or doc.get("status") in ("sectioned", "extracting", "extracted"):
+            sections_list = [
+                DocumentSection(
+                    section_id=s.get("id") or str(uuid.uuid4()),
+                    document_id=document_id,
+                    section_name=s.get("section_name", "unknown"),
+                    page_number=s.get("page_number", 1),
+                    text=s.get("raw_text", ""),
+                    confidence=float(s.get("confidence", 0.0) or 0.0),
+                    block_ids=[],
+                    bbox=None,
+                )
+                for s in db_sections
+            ]
+            section_result = DocumentSectionResult(
+                document_id=document_id,
+                document_type=doc_type,
+                sections=sections_list,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document must complete section detection before extraction."
+            )
+
+    # 3. Transition document status to 'extracting' & record audit log
+    start_time = time.time()
+    try:
+        supabase_service.update_document_status(document_id, "extracting")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="extraction",
+            status="started",
+            message="Structured extraction started",
+            metadata={
+                "document_type": section_result.document_type,
+                "sections_count": len(section_result.sections),
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record extraction started log for {document_id}: {log_err}")
+
+    # 4. Run targeted extraction
+    try:
+        extraction_result = extract_document_fields(section_result)
+    except GeminiNotConfiguredError as cfg_err:
+        duration_ms = int((time.time() - start_time) * 1000)
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="extraction",
+                status="failed",
+                message=str(cfg_err),
+                metadata={"processing_duration_ms": duration_ms}
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(cfg_err)
+        )
+    except GeminiServiceError as gem_err:
+        duration_ms = int((time.time() - start_time) * 1000)
+        err_msg = f"AI extraction failed: {str(gem_err)}"
+        logger.error(f"Gemini extraction error for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="extraction",
+                status="failed",
+                message=err_msg,
+                metadata={"processing_duration_ms": duration_ms}
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=err_msg
+        )
+    except Exception as general_err:
+        duration_ms = int((time.time() - start_time) * 1000)
+        err_msg = f"Extraction processing error: {str(general_err)}"
+        logger.error(f"Unexpected error extracting fields for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="extraction",
+                status="failed",
+                message=err_msg,
+                metadata={"processing_duration_ms": duration_ms}
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during structured extraction. Please check server logs."
+        )
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    # 5. Persist fields to Supabase extracted_fields table (if not skipped)
+    if extraction_result.status != "skipped":
+        try:
+            supabase_service.insert_extracted_fields(document_id, extraction_result.fields)
+        except Exception as db_fields_err:
+            logger.warning(f"Failed to insert extracted fields to DB for {document_id}: {db_fields_err}")
+
+        # 6. Update document status to 'extracted'
+        try:
+            supabase_service.update_document_status(document_id, "extracted")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="extraction",
+                status="completed",
+                message="Structured extraction completed successfully",
+                metadata={
+                    "sections_processed": extraction_result.metadata.get("sections_processed", len(section_result.sections)),
+                    "fields_extracted": len(extraction_result.fields),
+                    "document_type": extraction_result.document_type,
+                    "processing_duration_ms": duration_ms,
+                }
+            )
+        except Exception as db_err:
+            logger.warning(f"Failed to update document status to extracted for {document_id}: {db_err}")
+    else:
+        # If skipped, record log
+        try:
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="extraction",
+                status="completed",
+                message="Structured extraction skipped (unsupported document type)",
+                metadata={
+                    "sections_processed": 0,
+                    "fields_extracted": 0,
+                    "document_type": extraction_result.document_type,
+                    "reason": extraction_result.reason,
+                    "processing_duration_ms": duration_ms,
+                }
+            )
+        except Exception:
+            pass
+
+    return extraction_result
+
+
+@router.get("/{document_id}/extraction", response_model=DocumentExtractionResult)
+async def get_document_extraction_endpoint(document_id: str) -> DocumentExtractionResult:
+    """
+    Retrieve stored structured extraction results for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    extraction_json_path = os.path.join(target_dir, "extraction.json")
+
+    if os.path.isfile(extraction_json_path):
+        try:
+            with open(extraction_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentExtractionResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read extraction.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored extraction: {str(err)}"
+            )
+
+    # Fallback to database query if artifact not on local disk
+    db_fields = supabase_service.get_extracted_fields(document_id)
+    if db_fields:
+        fields_list = [
+            ExtractedField(
+                id=f.get("id") or str(uuid.uuid4()),
+                field_name=f.get("field_name", "unknown"),
+                field_value=f.get("field_value"),
+                confidence=float(f.get("confidence", 0.0)) if f.get("confidence") is not None else None,
+                source=f.get("source") or "gemini",
+                source_text=f.get("source_text"),
+                section_name="database",
+                page_number=1,
+            )
+            for f in db_fields
+        ]
+        return DocumentExtractionResult(
+            document_id=document_id,
+            document_type=doc.get("document_type") or "unknown",
+            status="extracted",
+            fields=fields_list,
+            section_data={},
+            extracted_at=str(doc.get("updated_at") or datetime.utcnow().isoformat() + "Z"),
+            metadata={"source": "database"},
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Extraction result not found for document '{document_id}'. Run POST /api/documents/{document_id}/extract first."
+    )

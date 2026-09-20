@@ -178,6 +178,80 @@ Classification Result
 
 > **Decoupled Architecture Rule**: Classification uses structured OCR output (not raw images/PDFs) and Google Gemini semantic understanding. Gemini categorizes the document strictly into `invoice`, `onboarding_form`, or `unknown`. Any document that does not explicitly match the two supported archetypes (e.g. resumes, portfolios, general letters, menus) or falls below the confidence threshold is deterministically routed to `unknown`.
 
+### Section Detection (Phase 7)
+
+```
+OCR Result (ocr.json) + Classification (classification.json)
+↓
+Pre-routing Check:
+  - If document_type == 'unknown' -> return [] immediately (Bypass LLM)
+  - If invoice / onboarding_form -> Proceed
+↓
+Structure Analyzer Prompt Builder (Forbids field extraction)
+↓
+Gemini Section Detector (response_schema=GeminiSectionDetectionOutput)
+↓
+Section Whitelist Validation (Maps unrecognized sections to 'unknown')
+↓
+Bounding Box Union Mapping (From OCR Block Coordinates)
+↓
+Storage & Persistence:
+  - Save sections.json local artifact
+  - Persist to Supabase document_sections table
+  - Update documents status='sectioned' and log audit metrics
+```
+
+> **Decoupled Architecture Rule**: Section Detection is strictly a layout and regional segmentation stage. It identifies logical boundaries (`vendor_information`, `line_items`, `personal_information`, etc.) without extracting granular field values (such as names, dates, amounts, taxes). Field extraction is reserved exclusively for Phase 8.
+
+### Targeted Structured AI Extraction (Phase 8)
+
+```
+DocumentSectionResult (sections.json) + Classification (classification.json)
+↓
+Archetype Gate:
+  - If document_type == 'unknown' -> return {"status": "skipped", "reason": "Unsupported document type"}
+  - If invoice / onboarding_form -> Proceed to section-by-section extraction
+↓
+Iterate Each Detected Section:
+  ├── Look up Section Schema (e.g. vendor_information -> VendorInfoExtraction)
+  ├── Build Targeted Prompt:
+  │     - Contains ONLY current section text
+  │     - STRICT NULL POLICY: Return null for missing fields (No Hallucination / Inference)
+  │     - NO ARITHMETIC RECALCULATION: Reserved for Phase 9 Validation
+  ├── Dispatch to Gemini (gemini-2.5-flash) with Pydantic response_schema
+  └── Convert to Standardized Field Provenance Records:
+        - field_name, field_value, confidence, source='gemini', source_text, section_name, page_number
+↓
+Storage & Persistence:
+  ├── Save extraction.json local artifact
+  ├── Insert rows into Supabase extracted_fields table
+  ├── Update documents status='extracted'
+  └── Record processing_logs audit entry (stage='extraction')
+```
+
+#### Section-Specific Extraction Schema Hierarchy
+
+```
+Section Detection
+↓
+Targeted Gemini Extraction
+├── Vendor Schema
+├── Customer Schema
+├── Invoice Schema
+├── Line Item Schema
+└── Payment Schema
+
+and:
+
+Onboarding
+├── Personal Schema
+├── Contact Schema
+├── Employment Schema
+└── Identity Schema
+```
+
+> **Targeted Extraction Architectural Rule**: Gemini receives section-level input rather than the original document as a whole. The system strictly forbids passing the entire original PDF or full OCR text to Gemini for extraction. Instead, Gemini receives only the text of the targeted section and its corresponding schema. This drastically reduces token overhead, eliminates cross-section context contamination, and guarantees layout grounding. Missing fields strictly default to `null` rather than fabricated or inferred values.
+
 ---
 
 ## 2. Frontend Architecture

@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS documents (
 -- Ensure storage_path exists if documents table already existed from Phase 2
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_path TEXT;
 
--- Update status constraint to support 'ocr_completed' (Phase 5)
+-- Update status constraint to support 'ocr_completed' (Phase 5), 'sectioned' (Phase 7), and 'extracted' (Phase 8)
 ALTER TABLE documents DROP CONSTRAINT IF EXISTS chk_documents_status;
 ALTER TABLE documents ADD CONSTRAINT chk_documents_status CHECK (
     status IN (
@@ -70,7 +70,9 @@ ALTER TABLE documents ADD CONSTRAINT chk_documents_status CHECK (
         'ocr',
         'ocr_completed',
         'classified',
+        'sectioned',
         'extracting',
+        'extracted',
         'validating',
         'completed',
         'needs_review',
