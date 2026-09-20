@@ -25,6 +25,8 @@ import {
   ChevronDown,
   ChevronRight,
   Boxes,
+  ShieldCheck,
+  CheckSquare,
 } from 'lucide-react';
 
 function formatSectionTitle(sectionName) {
@@ -93,6 +95,9 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [extractionResult, setExtractionResult] = useState(null);
   const [extractionError, setExtractionError] = useState(null);
   const [expandedFields, setExpandedFields] = useState({});
+  const [validating, setValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState(null);
+  const [validationError, setValidationError] = useState(null);
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
@@ -293,6 +298,25 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
+  const handleValidate = async () => {
+    if (!uploadedDoc?.id) return;
+    setValidating(true);
+    setValidationError(null);
+
+    const result = await api.validateDocument(uploadedDoc.id);
+    setValidating(false);
+
+    if (result.ok && result.data) {
+      setValidationResult(result.data);
+      setUploadedDoc((prev) => ({
+        ...prev,
+        status: result.data.document_status,
+      }));
+    } else {
+      setValidationError(result.error || 'Validation failed.');
+    }
+  };
+
   const toggleSection = (idx) => {
     setExpandedSections((prev) => ({
       ...prev,
@@ -315,12 +339,15 @@ export default function DocumentUpload({ onUploadSuccess }) {
     setClassificationResult(null);
     setSectionsResult(null);
     setExtractionResult(null);
+    setValidationResult(null);
     setRunningOcr(false);
     setClassifying(false);
     setDetectingSections(false);
     setExtracting(false);
+    setValidating(false);
     setSectionsError(null);
     setExtractionError(null);
+    setValidationError(null);
     setExpandedSections({});
     setExpandedFields({});
     setOcrProgressText('');
@@ -339,7 +366,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
           </div>
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 8 Pipeline
+            Phase 9 Pipeline
           </Badge>
         </div>
         <CardDescription className="text-xs text-muted-foreground">
@@ -353,6 +380,13 @@ export default function DocumentUpload({ onUploadSuccess }) {
           <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
             <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
             <div className="flex-1">{error}</div>
+          </div>
+        )}
+
+        {validationError && (
+          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">{validationError}</div>
           </div>
         )}
 
@@ -382,6 +416,10 @@ export default function DocumentUpload({ onUploadSuccess }) {
             <div className={`flex items-center gap-1 shrink-0 ${extractionResult ? (extractionResult.status === 'skipped' ? 'text-amber-400 font-semibold' : 'text-emerald-400 font-semibold') : (sectionsResult ? 'text-cyan-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
               {extractionResult ? (extractionResult.status === 'skipped' ? <AlertCircle className="h-3.5 w-3.5 text-amber-400" /> : <CheckCircle2 className="h-3.5 w-3.5" />) : <span className={`h-1.5 w-1.5 rounded-full ${sectionsResult ? 'bg-cyan-400' : 'bg-slate-600'}`} />} Extract
             </div>
+            <span className="text-muted-foreground/60 shrink-0">→</span>
+            <div className={`flex items-center gap-1 shrink-0 ${validationResult ? (validationResult.document_status === 'completed' ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold') : (extractionResult && extractionResult.status !== 'skipped' ? 'text-emerald-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
+              {validationResult ? (validationResult.document_status === 'completed' ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-400" />) : <span className={`h-1.5 w-1.5 rounded-full ${extractionResult && extractionResult.status !== 'skipped' ? 'bg-emerald-400' : 'bg-slate-600'}`} />} Validate
+            </div>
           </div>
         )}
 
@@ -392,30 +430,36 @@ export default function DocumentUpload({ onUploadSuccess }) {
               <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold">
                 <CheckCircle2 className="h-4 w-4" />
                 <span>
-                  {extractionResult
-                    ? (extractionResult.status === 'skipped' ? "Extraction skipped (Unknown archetype)" : "Fields extracted successfully")
-                    : sectionsResult
-                      ? "Sections detected"
-                      : classificationResult
-                        ? "Document classified"
-                        : preprocessResult
-                          ? "Document prepared for OCR"
-                          : "Document uploaded successfully"}
+                  {validationResult
+                    ? (validationResult.document_status === 'completed' ? "Deterministic validation passed" : "Validation requires review")
+                    : extractionResult
+                      ? (extractionResult.status === 'skipped' ? "Extraction skipped (Unknown archetype)" : "Fields extracted successfully")
+                      : sectionsResult
+                        ? "Sections detected"
+                        : classificationResult
+                          ? "Document classified"
+                          : preprocessResult
+                            ? "Document prepared for OCR"
+                            : "Document uploaded successfully"}
                 </span>
               </div>
               <Badge
                 variant={
-                  uploadedDoc.status === "extracted"
+                  uploadedDoc.status === "completed"
                     ? "success"
-                    : uploadedDoc.status === "sectioned"
+                    : uploadedDoc.status === "needs_review"
                       ? "warning"
-                      : uploadedDoc.status === "classified"
-                        ? "default"
-                        : uploadedDoc.status === "ocr_completed"
-                          ? "success"
-                          : uploadedDoc.status === "preprocessed"
-                            ? "secondary"
-                            : "outline"
+                      : uploadedDoc.status === "extracted"
+                        ? "success"
+                        : uploadedDoc.status === "sectioned"
+                          ? "warning"
+                          : uploadedDoc.status === "classified"
+                            ? "default"
+                            : uploadedDoc.status === "ocr_completed"
+                              ? "success"
+                              : uploadedDoc.status === "preprocessed"
+                                ? "secondary"
+                                : "outline"
                 }
                 className="capitalize text-xs font-mono"
               >
@@ -876,6 +920,171 @@ export default function DocumentUpload({ onUploadSuccess }) {
                 </div>
               )}
 
+              {/* Validation Results Panel */}
+              {validationResult && (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3 text-xs font-mono space-y-3">
+                  <div className="flex items-center justify-between border-b border-emerald-500/20 pb-2">
+                    <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                      <ShieldCheck className="h-4 w-4" />
+                      <span>Deterministic Validation Summary</span>
+                    </div>
+                    <Badge
+                      variant={validationResult.document_status === "completed" ? "success" : "warning"}
+                      className={`text-[10px] font-mono uppercase px-2 py-0.5 ${validationResult.document_status === "completed" ? "bg-emerald-600/20 text-emerald-300 border-emerald-500/30" : "bg-amber-600/20 text-amber-300 border-amber-500/30"}`}
+                    >
+                      {validationResult.document_status === "completed" ? "Document: Completed" : "Document: Needs Review"}
+                    </Badge>
+                  </div>
+
+                  {/* Summary Metric Counters */}
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    <div className="rounded bg-background/60 p-2 border border-border/40">
+                      <div className="text-[10px] text-muted-foreground uppercase">Total Fields</div>
+                      <div className="text-sm font-bold text-white">{validationResult.summary?.total_fields ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
+                      <div className="text-[10px] text-emerald-400/80 uppercase">Valid</div>
+                      <div className="text-sm font-bold text-emerald-400">{validationResult.summary?.valid_count ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-amber-500/30">
+                      <div className="text-[10px] text-amber-400/80 uppercase">Needs Review</div>
+                      <div className="text-sm font-bold text-amber-400">{validationResult.summary?.needs_review_count ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
+                      <div className="text-[10px] text-rose-400/80 uppercase">Conflicts</div>
+                      <div className="text-sm font-bold text-rose-400">{validationResult.summary?.conflict_count ?? 0}</div>
+                    </div>
+                  </div>
+
+                  {/* Validation Issues Alert Box if issues exist */}
+                  {validationResult.validation_issues?.length > 0 && (
+                    <div className="rounded border border-amber-500/30 bg-amber-950/20 p-2.5 space-y-1.5 text-[11px]">
+                      <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                        <AlertCircle className="h-3.5 w-3.5" />
+                        Issues Detected ({validationResult.validation_issues.length}):
+                      </div>
+                      <div className="space-y-1">
+                        {validationResult.validation_issues.map((issue, idx) => (
+                          <div key={idx} className="flex items-start gap-2 bg-background/50 p-1.5 rounded border border-amber-500/20">
+                            <span className={`px-1.5 py-0.2 rounded text-[9px] uppercase font-bold shrink-0 ${issue.status === 'conflict' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'}`}>
+                              {issue.status}
+                            </span>
+                            <div className="flex-1">
+                              <span className="font-semibold text-slate-200">{formatFieldName(issue.field_name)}:</span>{' '}
+                              <span className="text-slate-300">{issue.message}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Validated Fields List (Original vs Normalized) */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-semibold text-slate-200">
+                      Normalized & Validated Fields ({validationResult.fields?.length ?? 0})
+                    </div>
+                    <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                      {validationResult.fields?.map((field, idx) => {
+                        const isExpanded = expandedFields[`val_${field.field_name}_${idx}`];
+                        const isConflict = field.validation_status === 'conflict';
+                        const isNeedsReview = field.validation_status === 'needs_review';
+                        return (
+                          <div
+                            key={idx}
+                            className={`rounded bg-background/70 p-2 border text-[11px] transition-colors ${
+                              isConflict
+                                ? 'border-rose-500/40 bg-rose-950/10'
+                                : isNeedsReview
+                                  ? 'border-amber-500/40 bg-amber-950/10'
+                                  : 'border-border/40'
+                            }`}
+                          >
+                            <div
+                              onClick={() => toggleField(`val_${field.field_name}_${idx}`)}
+                              className="flex items-center justify-between gap-2 cursor-pointer select-none"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                {isExpanded ? (
+                                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                ) : (
+                                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                )}
+                                <span className="font-semibold text-slate-200 truncate">
+                                  {formatFieldName(field.field_name)}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[9px] uppercase px-1.5 py-0.2 font-bold ${
+                                    isConflict
+                                      ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+                                      : isNeedsReview
+                                        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                                        : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                                  }`}
+                                >
+                                  {field.validation_status || 'VALID'}
+                                </Badge>
+                                {field.confidence != null && (
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {Math.round(field.confidence * 100)}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Value Display: Original & Normalized */}
+                            <div className="mt-1.5 ml-5 grid grid-cols-2 gap-2 text-[10px] font-mono">
+                              <div className="rounded bg-background/60 p-1.5 border border-border/30">
+                                <span className="text-muted-foreground block text-[9px] uppercase">Original Value:</span>
+                                <span className="text-slate-200 break-all font-medium">
+                                  {field.field_value != null ? String(field.field_value) : <span className="text-muted-foreground italic">null</span>}
+                                </span>
+                              </div>
+                              <div className="rounded bg-background/60 p-1.5 border border-border/30">
+                                <span className="text-muted-foreground block text-[9px] uppercase">Normalized Value:</span>
+                                <span className="text-emerald-300 break-all font-medium">
+                                  {field.normalized_value != null ? String(field.normalized_value) : <span className="text-muted-foreground italic">null</span>}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Validation Message Callout */}
+                            {field.validation_message && (
+                              <div className={`mt-1.5 ml-5 p-1.5 rounded text-[10px] flex items-center gap-1.5 border ${
+                                isConflict ? 'bg-rose-950/30 text-rose-300 border-rose-500/30' : 'bg-amber-950/30 text-amber-300 border-amber-500/30'
+                              }`}>
+                                <AlertCircle className="h-3 w-3 shrink-0" />
+                                <span>{field.validation_message}</span>
+                              </div>
+                            )}
+
+                            {/* Expanded Provenance */}
+                            {isExpanded && (
+                              <div className="mt-2 ml-5 p-2 rounded bg-muted/30 border border-border/30 text-[10px] font-mono text-muted-foreground space-y-1">
+                                <div><span className="text-slate-400">Field Key:</span> {field.field_name}</div>
+                                <div><span className="text-slate-400">Source:</span> {field.source || 'gemini'} (Page {field.page_number || 1})</div>
+                                {field.source_text && (
+                                  <div>
+                                    <span className="text-slate-400">Source Text Excerpt:</span>
+                                    <div className="mt-0.5 p-1.5 rounded bg-background/80 text-slate-300 italic whitespace-pre-wrap">
+                                      &quot;{field.source_text}&quot;
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
                 <div className="flex items-center justify-between">
                   <span>Document ID:</span>
@@ -1021,11 +1230,57 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       </>
                     )}
                   </Button>
+                ) : !validationResult ? (
+                  <Button
+                    size="sm"
+                    onClick={handleValidate}
+                    disabled={validating}
+                    className="text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-500/20 cursor-pointer"
+                  >
+                    {validating ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Validating deterministic rules...
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        Normalize & Validate
+                      </>
+                    )}
+                  </Button>
                 ) : (
-                  <Badge variant="success" className="text-xs gap-1 py-1 px-2.5 bg-cyan-600/20 border-cyan-500/40 text-cyan-300">
-                    <CheckCircle2 className="h-3.5 w-3.5 text-cyan-400" />
-                    Fields Extracted
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleValidate}
+                      disabled={validating}
+                      className="text-xs gap-1 border-emerald-500/30 text-emerald-300 hover:bg-emerald-950/30 cursor-pointer"
+                    >
+                      {validating ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3" />
+                      )}
+                      Re-validate
+                    </Button>
+                    <Badge
+                      variant={validationResult.document_status === "completed" ? "success" : "warning"}
+                      className={`text-xs gap-1 py-1 px-2.5 ${
+                        validationResult.document_status === "completed"
+                          ? "bg-emerald-600/20 border-emerald-500/40 text-emerald-300"
+                          : "bg-amber-600/20 border-amber-500/40 text-amber-300"
+                      }`}
+                    >
+                      {validationResult.document_status === "completed" ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
+                      )}
+                      {validationResult.document_status === "completed" ? "Validation Passed" : "Needs Review"}
+                    </Badge>
+                  </div>
                 )}
               </div>
             </div>

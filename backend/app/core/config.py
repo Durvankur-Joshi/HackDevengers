@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     CLASSIFICATION_CONFIDENCE_THRESHOLD: float = 0.70
+    INVOICE_ROUNDING_TOLERANCE: float = 0.05
 
     model_config = SettingsConfigDict(
         env_file=".env",

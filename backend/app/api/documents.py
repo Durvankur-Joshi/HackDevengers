@@ -18,11 +18,14 @@ from app.pipeline.types import (
     DocumentSectionResult,
     ExtractedField,
     DocumentExtractionResult,
+    DocumentValidationSummary,
+    DocumentValidationResult,
 )
 from app.pipeline.ocr import get_ocr_engine, OCREngineUnavailableError, OCREngineError
 from app.pipeline.classifier import classify_document
 from app.pipeline.section_detector import detect_sections_for_document
 from app.pipeline.extractor import extract_document_fields
+from app.pipeline.validator import DocumentValidator
 from app.pipeline.preprocessing import BASE_TMP_DIR
 from app.services.supabase import supabase_service
 from app.services.storage import storage_service
@@ -1192,3 +1195,239 @@ async def get_document_extraction_endpoint(document_id: str) -> DocumentExtracti
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Extraction result not found for document '{document_id}'. Run POST /api/documents/{document_id}/extract first."
     )
+
+
+# ==============================================================================
+# PHASE 9: Normalization & Deterministic Validation Endpoints
+# ==============================================================================
+
+@router.post("/{document_id}/validate", response_model=DocumentValidationResult)
+async def validate_document_endpoint(document_id: str) -> DocumentValidationResult:
+    """
+    Execute deterministic normalization and validation on extracted document fields.
+    Zero AI/Gemini usage. Verifies dates, numbers, formats, line math, subtotal, and tax arithmetic.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    # 1. Verify document exists
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    # 2. Verify extraction has completed (Preconditions)
+    doc_status = doc.get("status")
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    extraction_json_path = os.path.join(target_dir, "extraction.json")
+
+    has_extraction_artifact = os.path.isfile(extraction_json_path)
+    allowed_statuses = ("extracted", "validating", "completed", "needs_review")
+
+    if not has_extraction_artifact and doc_status not in allowed_statuses:
+        # Check specific preceding stages for precise error messages
+        if doc_status in ("uploaded", "preprocessing", "preprocessed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document must complete OCR before validation."
+            )
+        elif doc_status in ("ocr", "ocr_completed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document must be classified before validation."
+            )
+        elif doc_status == "classified":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document must complete section detection before validation."
+            )
+        elif doc_status in ("sectioned", "extracting"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Document must complete structured extraction before validation."
+            )
+
+    # 3. Load extracted fields and section data
+    fields: List[ExtractedField] = []
+    section_data: dict = {}
+    doc_type = doc.get("document_type") or "unknown"
+
+    if has_extraction_artifact:
+        try:
+            with open(extraction_json_path, "r", encoding="utf-8") as f:
+                ext_data = json.load(f)
+            doc_type = ext_data.get("document_type") or doc_type
+            section_data = ext_data.get("section_data") or {}
+            for item in ext_data.get("fields", []):
+                fields.append(ExtractedField.model_validate(item))
+        except Exception as err:
+            logger.error(f"Failed to read extraction artifact for {document_id}: {err}")
+
+    # Fallback to database if no artifact on disk
+    if not fields:
+        db_fields = supabase_service.get_extracted_fields(document_id)
+        if db_fields:
+            for f in db_fields:
+                fields.append(
+                    ExtractedField(
+                        id=f.get("id") or str(uuid.uuid4()),
+                        section_id=f.get("section_id"),
+                        field_name=f.get("field_name", "unknown"),
+                        field_value=f.get("field_value"),
+                        confidence=float(f.get("confidence", 0.0)) if f.get("confidence") is not None else None,
+                        source=f.get("source") or "gemini",
+                        source_text=f.get("source_text"),
+                        section_name="database",
+                        page_number=1,
+                    )
+                )
+
+    if not fields and doc_type != "unknown":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No extracted fields found for document. Please run extraction first."
+        )
+
+    # 4. Status transition to 'validating' & audit log for normalization
+    start_time = time.time()
+    try:
+        supabase_service.update_document_status(document_id, "validating")
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="normalization",
+            status="started",
+            message="Field normalization started",
+            metadata={"field_count": len(fields)}
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record validation started log for {document_id}: {log_err}")
+
+    # 5. Run deterministic normalization & validation
+    try:
+        validator = DocumentValidator()
+        validation_result = validator.normalize_and_validate(
+            document_id=document_id,
+            document_type=doc_type,
+            fields=fields,
+            section_data=section_data,
+        )
+    except Exception as val_err:
+        duration_ms = int((time.time() - start_time) * 1000)
+        err_msg = f"Deterministic validation encountered an internal error: {str(val_err)}"
+        logger.error(f"Validation error for {document_id}: {err_msg}")
+        try:
+            supabase_service.update_document_status(document_id, "failed")
+            supabase_service.create_processing_log(
+                document_id=document_id,
+                stage="validation",
+                status="failed",
+                message=err_msg,
+                metadata={"processing_duration_ms": duration_ms}
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred during deterministic validation."
+        )
+
+    duration_ms = int((time.time() - start_time) * 1000)
+
+    # 6. Save local validation.json artifact
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        validation_json_path = os.path.join(target_dir, "validation.json")
+        with open(validation_json_path, "w", encoding="utf-8") as f:
+            f.write(validation_result.model_dump_json(indent=2))
+    except Exception as art_err:
+        logger.warning(f"Could not persist validation.json for {document_id}: {art_err}")
+
+    # 7. Persist validated fields to Supabase extracted_fields
+    try:
+        supabase_service.save_validated_fields(document_id, validation_result.fields)
+    except Exception as db_fields_err:
+        logger.warning(f"Could not update extracted_fields in DB for {document_id}: {db_fields_err}")
+
+    # 8. Update document status to completed or needs_review
+    final_status = validation_result.document_status
+    try:
+        supabase_service.update_document_status(document_id, final_status)
+    except Exception as db_status_err:
+        logger.warning(f"Could not update document status to {final_status} for {document_id}: {db_status_err}")
+
+    # 9. Record completed audit logs for normalization and validation stages
+    try:
+        normalized_count = sum(1 for f in validation_result.fields if f.normalized_value is not None)
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="normalization",
+            status="completed",
+            message="Field normalization completed successfully",
+            metadata={
+                "field_count": len(validation_result.fields),
+                "normalized_count": normalized_count,
+            }
+        )
+        supabase_service.create_processing_log(
+            document_id=document_id,
+            stage="validation",
+            status="completed",
+            message=f"Deterministic validation completed with status: {final_status}",
+            metadata={
+                "total_fields": validation_result.summary.total_fields,
+                "valid_count": validation_result.summary.valid_count,
+                "needs_review_count": validation_result.summary.needs_review_count,
+                "conflict_count": validation_result.summary.conflict_count,
+                "document_status": final_status,
+                "processing_duration_ms": duration_ms,
+            }
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to record completed validation logs for {document_id}: {log_err}")
+
+    return validation_result
+
+
+@router.get("/{document_id}/validation", response_model=DocumentValidationResult)
+async def get_document_validation_endpoint(document_id: str) -> DocumentValidationResult:
+    """
+    Retrieve stored deterministic validation results for an existing document.
+    """
+    if not supabase_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is not configured."
+        )
+
+    doc = supabase_service.get_document(document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID '{document_id}' not found."
+        )
+
+    target_dir = os.path.abspath(os.path.join(BASE_TMP_DIR, document_id))
+    validation_json_path = os.path.join(target_dir, "validation.json")
+
+    if os.path.isfile(validation_json_path):
+        try:
+            with open(validation_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return DocumentValidationResult.model_validate(data)
+        except Exception as err:
+            logger.error(f"Failed to read validation.json for {document_id}: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse stored validation: {str(err)}"
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Validation result not found for document '{document_id}'. Run POST /api/documents/{document_id}/validate first."
+    )
+

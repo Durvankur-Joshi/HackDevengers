@@ -114,10 +114,17 @@ CREATE TABLE IF NOT EXISTS extracted_fields (
     confidence NUMERIC(5, 4) NULL,
     source TEXT NULL,
     source_text TEXT NULL,
+    normalized_value TEXT NULL,
+    validation_status TEXT NULL,
+    validation_message TEXT NULL,
+    normalized_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT chk_extracted_fields_source CHECK (
-        source IS NULL OR source IN ('ocr', 'gemini', 'vision', 'manual')
+        source IS NULL OR source IN ('ocr', 'gemini', 'vision', 'manual', 'validation')
+    ),
+    CONSTRAINT chk_extracted_fields_validation_status CHECK (
+        validation_status IS NULL OR validation_status IN ('valid', 'needs_review', 'conflict')
     )
 );
 

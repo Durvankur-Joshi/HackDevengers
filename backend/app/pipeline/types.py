@@ -323,6 +323,10 @@ class ExtractedField(BaseModel):
     source_text: Optional[str] = Field(default=None, description="Targeted source text excerpt where value was located")
     section_name: str = Field(..., description="Section from which field was extracted")
     page_number: int = Field(default=1, description="Page number where field was located")
+    normalized_value: Optional[str] = Field(default=None, description="Deterministic canonical normalized representation")
+    validation_status: Optional[str] = Field(default=None, description="Validation status: 'valid', 'needs_review', or 'conflict'")
+    validation_message: Optional[str] = Field(default=None, description="Explanation for non-valid status")
+    normalized_at: Optional[str] = Field(default=None, description="ISO timestamp of normalization/validation")
 
 
 class DocumentExtractionResult(BaseModel):
@@ -335,3 +339,31 @@ class DocumentExtractionResult(BaseModel):
     section_data: Dict[str, Any] = Field(default_factory=dict, description="Structured fields grouped by section")
     extracted_at: str = Field(..., description="ISO 8601 timestamp of extraction")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata including section count and model used")
+
+
+# --- Phase 9: Normalization & Deterministic Validation Models ---
+
+class ValidationStatusEnum(str, Enum):
+    VALID = "valid"
+    NEEDS_REVIEW = "needs_review"
+    CONFLICT = "conflict"
+
+
+class DocumentValidationSummary(BaseModel):
+    """Validation count metrics without percentages or arbitrary scoring."""
+    total_fields: int = Field(default=0, description="Total number of evaluated fields")
+    valid_count: int = Field(default=0, description="Fields meeting all format and deterministic rules")
+    needs_review_count: int = Field(default=0, description="Fields requiring human review or calculation fixes")
+    conflict_count: int = Field(default=0, description="Fields with conflicting duplicate extractions")
+
+
+class DocumentValidationResult(BaseModel):
+    """Final output of Phase 9 Deterministic Normalization and Validation stage."""
+    document_id: str = Field(..., description="Document UUID")
+    document_type: str = Field(..., description="Document type: invoice, onboarding_form, or unknown")
+    document_status: str = Field(..., description="Document status: 'completed' or 'needs_review'")
+    summary: DocumentValidationSummary = Field(default_factory=DocumentValidationSummary)
+    fields: List[ExtractedField] = Field(default_factory=list, description="Fields with normalized values and validation statuses")
+    validation_issues: List[Dict[str, Any]] = Field(default_factory=list, description="List of non-valid issues with field and message")
+    validated_at: str = Field(..., description="ISO 8601 timestamp of validation execution")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata including tolerance and rules evaluated")

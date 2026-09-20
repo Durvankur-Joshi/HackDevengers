@@ -252,6 +252,52 @@ Onboarding
 
 > **Targeted Extraction Architectural Rule**: Gemini receives section-level input rather than the original document as a whole. The system strictly forbids passing the entire original PDF or full OCR text to Gemini for extraction. Instead, Gemini receives only the text of the targeted section and its corresponding schema. This drastically reduces token overhead, eliminates cross-section context contamination, and guarantees layout grounding. Missing fields strictly default to `null` rather than fabricated or inferred values.
 
+### Deterministic Normalization & Validation (Phase 9)
+
+```
+DocumentExtractionResult (extraction.json / extracted_fields)
+↓
+Phase 9 Pipeline Stage:
+├── 1. Deterministic Normalization Layer (pipeline/normalizer.py)
+│     - Dates: Canonical YYYY-MM-DD (ambiguous dates marked for review, no guessing)
+│     - Numbers/Currencies: Strips presentation commas/Indian lakhs, preserves values
+│     - Emails: Lowercase, trimmed, surrounding artifact cleanup
+│     - Phones: Country code preserved (+91, +1), formatting stripped
+│     - Text: Collapses repeated spaces, preserves proper noun casing
+│     - ANTI-CORRUPTION RULE: Never overwrites original field_value
+│
+├── 2. Deterministic Conflict Detection
+│     - Compares normalized values for identical logical fields
+│     - Differing values -> status: 'conflict'
+│     - Identical values -> status: 'valid' (no conflict)
+│
+├── 3. Field-Level & Document-Level Validation (pipeline/validator.py)
+│     - Invoices:
+│       * Required fields check: vendor_name, invoice_number, invoice_date, total
+│       * Date relationship: due_date >= invoice_date
+│       * Line item arithmetic: quantity * unit_price == line_total (tolerance: 0.05)
+│       * Subtotal reconciliation: sum(line_totals) == subtotal
+│       * Tax reconciliation: subtotal * tax_rate == tax_amount
+│       * Total reconciliation: subtotal + tax_amount - discount == total
+│     - Onboarding Forms:
+│       * Required full_name check
+│       * Contact presence check (at least one of email or phone)
+│       * Email regex format validation
+│       * Phone digit range validation
+│
+├── 4. Document Status Determination:
+│     - No issues -> status: 'completed'
+│     - Non-valid fields / calculation mismatches / conflicts -> status: 'needs_review'
+│     - Technical failures -> status: 'failed'
+│
+└── 5. Storage & Persistence:
+      - Save validation.json local artifact
+      - Persist normalized values and validation statuses in extracted_fields
+      - Record processing_logs audit entries (stages: 'normalization', 'validation')
+```
+
+> **Deterministic Architecture Rule**: Gemini and LLMs MUST NOT be used for arithmetic verification, date logic, email/phone format checks, or normalization. All reconciliation is 100% deterministic Python logic. Original extracted values (`field_value`) remain immutable for audit provenance.
+
 ---
 
 ## 2. Frontend Architecture

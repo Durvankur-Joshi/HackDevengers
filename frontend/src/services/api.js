@@ -326,6 +326,46 @@ export class ApiService {
       return { ok: false, error: err.message || 'Network error retrieving extraction results.' };
     }
   }
+
+  /**
+   * Execute Phase 9 deterministic normalization and validation
+   * @param {string} documentId
+   */
+  async validateDocument(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/validate`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Validation failed.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error during validation.' };
+    }
+  }
+
+  /**
+   * Retrieve cached validation results for an existing document
+   * @param {string} documentId
+   */
+  async getValidation(documentId) {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/documents/${documentId}/validation`, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        return { ok: false, error: data?.detail || 'Could not load validation results.' };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message || 'Network error retrieving validation results.' };
+    }
+  }
 }
 
 export const api = new ApiService();

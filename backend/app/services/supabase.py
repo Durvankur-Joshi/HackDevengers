@@ -133,6 +133,15 @@ class SupabaseService:
             if res.data and len(res.data) > 0:
                 return res.data[0]
         except Exception as e:
+            # If 'validating', 'completed', or 'needs_review' rejected by unmigrated DB, fallback to 'extracted'
+            if status in ("validating", "completed", "needs_review"):
+                logger.warning(f"Status '{status}' rejected ({e}); falling back to 'extracted'")
+                try:
+                    res = client.table("documents").update({"status": "extracted"}).eq("id", document_id).execute()
+                    if res.data and len(res.data) > 0:
+                        return res.data[0]
+                except Exception:
+                    pass
             # If 'extracted' was rejected by an un-migrated DB check constraint, fallback to 'sectioned'
             if status == "extracted":
                 logger.warning(f"Status 'extracted' rejected ({e}); falling back to 'sectioned'")
@@ -256,6 +265,11 @@ class SupabaseService:
                 except (ValueError, TypeError):
                     sec_uuid = None
 
+            norm_val = f.normalized_value if hasattr(f, "normalized_value") else f.get("normalized_value")
+            val_stat = f.validation_status if hasattr(f, "validation_status") else f.get("validation_status")
+            val_msg = f.validation_message if hasattr(f, "validation_message") else f.get("validation_message")
+            norm_at = f.normalized_at if hasattr(f, "normalized_at") else f.get("normalized_at")
+
             payload = {
                 "document_id": document_id,
                 "field_name": str(fname),
@@ -264,6 +278,15 @@ class SupabaseService:
                 "source": valid_src,
                 "source_text": fsrc_txt,
             }
+            if norm_val is not None:
+                payload["normalized_value"] = str(norm_val)
+            if val_stat is not None:
+                payload["validation_status"] = str(val_stat)
+            if val_msg is not None:
+                payload["validation_message"] = str(val_msg)
+            if norm_at is not None:
+                payload["normalized_at"] = str(norm_at)
+
             if sec_uuid:
                 payload["section_id"] = sec_uuid
             payloads.append(payload)
@@ -272,16 +295,46 @@ class SupabaseService:
             res = client.table("extracted_fields").insert(payloads).execute()
             return res.data or []
         except Exception as e:
+            err_str = str(e)
+            # If failed due to unmigrated validation columns, fallback to basic fields
+            if "normalized_value" in err_str or "validation_status" in err_str or "42703" in err_str:
+                logger.warning(f"Supabase extracted_fields missing validation columns ({err_str}). Falling back to standard columns. (Run docs/migrations/phase9_validation_columns.sql to enable DB column storage).")
+                for p in payloads:
+                    p.pop("normalized_value", None)
+                    p.pop("validation_status", None)
+                    p.pop("validation_message", None)
+                    p.pop("normalized_at", None)
+                try:
+                    res = client.table("extracted_fields").insert(payloads).execute()
+                    return res.data or []
+                except Exception as e_retry:
+                    logger.warning(f"Fallback insert without validation columns failed: {e_retry}")
+
             # If failed due to FK constraint on section_id, retry without section_id
             logger.warning(f"Insert with section_id failed ({e}), attempting fallback without section_id...")
             for p in payloads:
                 p.pop("section_id", None)
+                p.pop("normalized_value", None)
+                p.pop("validation_status", None)
+                p.pop("validation_message", None)
+                p.pop("normalized_at", None)
             try:
                 res = client.table("extracted_fields").insert(payloads).execute()
                 return res.data or []
             except Exception as e2:
                 logger.error(f"Failed to insert extracted fields into Supabase: {e2}")
                 raise
+
+    def save_validated_fields(
+        self,
+        document_id: str,
+        fields: List[Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Persists deterministic validation and normalization results to the extracted_fields table.
+        Safe and idempotent: replaces existing records for this document without deleting other documents.
+        """
+        return self.insert_extracted_fields(document_id, fields)
 
     def get_extracted_fields(self, document_id: str) -> List[Dict[str, Any]]:
         """Retrieve stored extracted fields for a document from Supabase."""
