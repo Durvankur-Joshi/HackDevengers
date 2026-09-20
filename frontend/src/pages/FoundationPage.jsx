@@ -59,7 +59,7 @@ export default function FoundationPage() {
       <div className="pointer-events-none absolute -bottom-40 left-1/3 h-96 w-96 rounded-full bg-violet-600/10 blur-3xl" />
 
       {/* Top Navigation / Header */}
-      <header className="relative z-10 mx-auto w-full max-w-5xl flex items-center justify-between pb-6 border-b border-border/40">
+      <header className="relative z-10 mx-auto w-full max-w-6xl flex items-center justify-between pb-6 border-b border-border/40">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 border border-primary/30 text-primary shadow-[0_0_15px_rgba(59,130,246,0.3)]">
             <Layers className="h-5 w-5" />
@@ -81,15 +81,15 @@ export default function FoundationPage() {
       </header>
 
       {/* Main Foundation Showcase */}
-      <main className="relative z-10 mx-auto my-auto w-full max-w-3xl py-12 text-center">
+      <main className="relative z-10 mx-auto my-auto w-full max-w-6xl py-8 text-center">
         {/* Foundation Tag */}
-        <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-6 backdrop-blur-md">
+        <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-5 backdrop-blur-md">
           <Zap className="h-3.5 w-3.5" />
-          Phase 3 — Document Ingestion & Storage Pipeline
+          Phase 12 — Final Document Dashboard &amp; End-to-End Pipeline
         </div>
 
         {/* Hero Title */}
-        <h2 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-white mb-4">
+        <h2 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white mb-3">
           Document-to-Action <br />
           <span className="bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">
             Pipeline
@@ -97,12 +97,12 @@ export default function FoundationPage() {
         </h2>
 
         {/* Required Short Description */}
-        <p className="mx-auto max-w-2xl text-lg sm:text-xl text-slate-300 font-normal leading-relaxed mb-10">
+        <p className="mx-auto max-w-2xl text-base sm:text-lg text-slate-300 font-normal leading-relaxed mb-8">
           Transform messy documents into structured, validated and actionable information.
         </p>
 
         {/* Document Ingestion Zone */}
-        <div className="mb-10">
+        <div className="mb-10 w-full">
           <DocumentUpload />
         </div>
 
@@ -224,7 +224,7 @@ export default function FoundationPage() {
       </main>
 
       {/* Footer */}
-      <footer className="relative z-10 mx-auto w-full max-w-5xl pt-6 border-t border-border/40 text-center text-xs text-muted-foreground">
+      <footer className="relative z-10 mx-auto w-full max-w-6xl pt-6 border-t border-border/40 text-center text-xs text-muted-foreground">
         <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>Document-to-Action Pipeline • HackDevengers</span>
           <div className="flex items-center gap-3">

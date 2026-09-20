@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { api } from '@/services/api';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -19,20 +19,22 @@ import {
   Tag,
   Brain,
   FileSpreadsheet,
-  UserCheck,
-  HelpCircle,
   FolderTree,
   ChevronDown,
   ChevronRight,
-  Boxes,
   ShieldCheck,
   CheckSquare,
   Eye,
   AlertTriangle,
   ListTodo,
   Calendar,
-  Clock,
-  Check,
+  Zap,
+  Play,
+  ArrowRight,
+  Filter,
+  Ban,
+  Search,
+  CheckCheck,
 } from 'lucide-react';
 
 function formatSectionTitle(sectionName) {
@@ -79,60 +81,89 @@ function getFileTypeBadge(filename, mimeType) {
   return { label: 'JPG', color: 'bg-amber-500/10 text-amber-400 border-amber-500/20', isPdf: false };
 }
 
+const KEY_FIELDS = new Set([
+  'invoice_number',
+  'invoice_date',
+  'due_date',
+  'total_amount',
+  'subtotal',
+  'tax_amount',
+  'vendor_name',
+  'customer_name',
+  'full_name',
+  'email',
+  'phone',
+  'start_date',
+  'job_title',
+  'department',
+]);
+
 export default function DocumentUpload({ onUploadSuccess }) {
   const [dragActive, setDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadedDoc, setUploadedDoc] = useState(null);
+
+  // Pipeline stage state
   const [preprocessing, setPreprocessing] = useState(false);
   const [preprocessResult, setPreprocessResult] = useState(null);
+
   const [runningOcr, setRunningOcr] = useState(false);
   const [ocrProgressText, setOcrProgressText] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
   const [viewMode, setViewMode] = useState('full');
+
   const [classifying, setClassifying] = useState(false);
   const [classificationResult, setClassificationResult] = useState(null);
+
   const [detectingSections, setDetectingSections] = useState(false);
   const [sectionsResult, setSectionsResult] = useState(null);
   const [sectionsError, setSectionsError] = useState(null);
   const [expandedSections, setExpandedSections] = useState({});
+
   const [extracting, setExtracting] = useState(false);
   const [extractionResult, setExtractionResult] = useState(null);
   const [extractionError, setExtractionError] = useState(null);
   const [expandedFields, setExpandedFields] = useState({});
+
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [validationError, setValidationError] = useState(null);
+
   const [recoveringVision, setRecoveringVision] = useState(false);
   const [visionResult, setVisionResult] = useState(null);
   const [visionError, setVisionError] = useState(null);
+
   const [generatingInsights, setGeneratingInsights] = useState(false);
   const [summaryResult, setSummaryResult] = useState(null);
   const [actionsResult, setActionsResult] = useState(null);
   const [insightsError, setInsightsError] = useState(null);
   const [actionUpdatingId, setActionUpdatingId] = useState(null);
+
+  // End-to-End Orchestrator state
+  const [isProcessingAll, setIsProcessingAll] = useState(false);
+  const [processStepText, setProcessStepText] = useState('');
+
+  // Structured Data Filters
+  const [fieldSearchFilter, setFieldSearchFilter] = useState('');
+  const [fieldStatusFilter, setFieldStatusFilter] = useState('all');
+
   const inputRef = useRef(null);
 
   const validateFile = (file) => {
     if (!file) return false;
-
-    // Check size
     if (file.size > MAX_FILE_SIZE_BYTES) {
       setError(`File is too large (${formatBytes(file.size)}). Maximum size is ${MAX_FILE_SIZE_MB} MB.`);
       return false;
     }
-
-    // Check extension & MIME
     const nameLower = file.name.toLowerCase();
     const hasValidExt = ALLOWED_EXTENSIONS.some((ext) => nameLower.endsWith(ext));
     const hasValidMime = ALLOWED_MIME_TYPES.includes(file.type?.toLowerCase());
-
     if (!hasValidExt && !hasValidMime) {
       setError('File type not supported. Please upload a PDF, JPG, or PNG.');
       return false;
     }
-
     setError(null);
     return true;
   };
@@ -140,18 +171,14 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const handleDrag = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
+    if (e.type === 'dragenter' || e.type === 'dragover') setDragActive(true);
+    else if (e.type === 'dragleave') setDragActive(false);
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
-
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
       if (validateFile(file)) {
@@ -173,21 +200,17 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
   const handleUpload = async () => {
     if (!selectedFile) return;
-
     setUploading(true);
     setError(null);
 
     const result = await api.uploadDocument(selectedFile);
-
     setUploading(false);
 
     if (result.ok && result.data) {
       setUploadedDoc(result.data);
       setPreprocessResult(null);
       setSelectedFile(null);
-      if (onUploadSuccess) {
-        onUploadSuccess(result.data);
-      }
+      if (onUploadSuccess) onUploadSuccess(result.data);
     } else {
       setError(result.error || 'Upload failed. Please try again.');
     }
@@ -195,69 +218,44 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
   const handlePreprocess = async () => {
     if (!uploadedDoc?.id) return;
-
     setPreprocessing(true);
     setError(null);
 
     const result = await api.preprocessDocument(uploadedDoc.id);
-
     setPreprocessing(false);
 
     if (result.ok && result.data) {
       setPreprocessResult(result.data);
-      setUploadedDoc((prev) => ({
-        ...prev,
-        status: 'preprocessed',
-      }));
+      setUploadedDoc((prev) => ({ ...prev, status: 'preprocessed' }));
     } else {
-      setError(result.error || 'Preprocessing failed. Please try again.');
+      setError(result.error || 'Preprocessing failed.');
     }
   };
 
   const handleRunOcr = async () => {
     if (!uploadedDoc?.id) return;
-
     setRunningOcr(true);
     setError(null);
     setOcrProgressText('Running OCR...');
 
-    const totalPages = preprocessResult?.page_count || 1;
-    let pageTimer = null;
-    if (totalPages > 1) {
-      let page = 1;
-      pageTimer = setInterval(() => {
-        if (page <= totalPages) {
-          setOcrProgressText(`Processing page ${page} of ${totalPages}...`);
-          page += 1;
-        }
-      }, 750);
-    }
-
     const result = await api.runOcr(uploadedDoc.id);
-
-    if (pageTimer) clearInterval(pageTimer);
     setRunningOcr(false);
     setOcrProgressText('');
 
     if (result.ok && result.data) {
       setOcrResult(result.data);
-      setUploadedDoc((prev) => ({
-        ...prev,
-        status: 'ocr_completed',
-      }));
+      setUploadedDoc((prev) => ({ ...prev, status: 'ocr_completed' }));
     } else {
-      setError(result.error || 'OCR extraction failed. Please try again.');
+      setError(result.error || 'OCR extraction failed.');
     }
   };
 
   const handleClassify = async () => {
     if (!uploadedDoc?.id) return;
-
     setClassifying(true);
     setError(null);
 
     const result = await api.classifyDocument(uploadedDoc.id);
-
     setClassifying(false);
 
     if (result.ok && result.data) {
@@ -268,7 +266,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
         document_type: result.data.document_type,
       }));
     } else {
-      setError(result.error || 'Classification failed. Please check Gemini API configuration.');
+      setError(result.error || 'Classification failed.');
     }
   };
 
@@ -282,10 +280,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
     if (result.ok && result.data) {
       setSectionsResult(result.data);
-      setUploadedDoc((prev) => ({
-        ...prev,
-        status: 'sectioned',
-      }));
+      setUploadedDoc((prev) => ({ ...prev, status: 'sectioned' }));
     } else {
       setSectionsError(result.error || 'Section detection failed.');
     }
@@ -302,10 +297,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
     if (result.ok && result.data) {
       setExtractionResult(result.data);
       if (result.data.status !== 'skipped') {
-        setUploadedDoc((prev) => ({
-          ...prev,
-          status: 'extracted',
-        }));
+        setUploadedDoc((prev) => ({ ...prev, status: 'extracted' }));
       }
     } else {
       setExtractionError(result.error || 'Structured field extraction failed.');
@@ -322,10 +314,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
     if (result.ok && result.data) {
       setValidationResult(result.data);
-      setUploadedDoc((prev) => ({
-        ...prev,
-        status: result.data.document_status,
-      }));
+      setUploadedDoc((prev) => ({ ...prev, status: result.data.document_status }));
     } else {
       setValidationError(result.error || 'Validation failed.');
     }
@@ -353,54 +342,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
-  const toggleSection = (idx) => {
-    setExpandedSections((prev) => ({
-      ...prev,
-      [idx]: !prev[idx],
-    }));
-  };
-
-  const toggleField = (key) => {
-    setExpandedFields((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
-
-  const handleReset = () => {
-    setSelectedFile(null);
-    setUploadedDoc(null);
-    setPreprocessResult(null);
-    setOcrResult(null);
-    setClassificationResult(null);
-    setSectionsResult(null);
-    setExtractionResult(null);
-    setValidationResult(null);
-    setVisionResult(null);
-    setRunningOcr(false);
-    setClassifying(false);
-    setDetectingSections(false);
-    setExtracting(false);
-    setValidating(false);
-    setRecoveringVision(false);
-    setSectionsError(null);
-    setExtractionError(null);
-    setValidationError(null);
-    setVisionError(null);
-    setExpandedSections({});
-    setExpandedFields({});
-    setOcrProgressText('');
-    setError(null);
-    setGeneratingInsights(false);
-    setSummaryResult(null);
-    setActionsResult(null);
-    setInsightsError(null);
-    setActionUpdatingId(null);
-    if (inputRef.current) {
-      inputRef.current.value = '';
-    }
-  };
-
   const handleGenerateInsights = async () => {
     if (!uploadedDoc?.id) return;
     setGeneratingInsights(true);
@@ -413,10 +354,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
       setSummaryResult(result.data.summary);
       setActionsResult(result.data.actions);
       if (result.data.document_status) {
-        setUploadedDoc((prev) => ({
-          ...prev,
-          status: result.data.document_status,
-        }));
+        setUploadedDoc((prev) => ({ ...prev, status: result.data.document_status }));
       }
     } else {
       setInsightsError(result.error || 'Failed to generate summary and actions.');
@@ -427,7 +365,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
     if (!actionId || !actionsResult) return;
     setActionUpdatingId(actionId);
 
-    // Optimistic update
     const previousActions = [...actionsResult.actions];
     setActionsResult((prev) => ({
       ...prev,
@@ -440,228 +377,1266 @@ export default function DocumentUpload({ onUploadSuccess }) {
     setActionUpdatingId(null);
 
     if (!result.ok) {
-      // Rollback on failure
-      setActionsResult((prev) => ({
-        ...prev,
-        actions: previousActions,
-      }));
+      setActionsResult((prev) => ({ ...prev, actions: previousActions }));
       setInsightsError(result.error || 'Failed to update action status.');
     }
   };
 
+  // End-to-End Pipeline Execution (Phase 12 requirement 10)
+  const handleProcessDocument = async () => {
+    if (!uploadedDoc?.id || isProcessingAll) return;
+    setIsProcessingAll(true);
+    setError(null);
+    setSectionsError(null);
+    setExtractionError(null);
+    setValidationError(null);
+    setVisionError(null);
+    setInsightsError(null);
+
+    try {
+      let currentDoc = uploadedDoc;
+
+      // 1. Preprocess
+      if (!preprocessResult && currentDoc.status !== 'preprocessed' && currentDoc.status !== 'ocr_completed' && currentDoc.status !== 'classified') {
+        setProcessStepText('Step 1/8: Preprocessing document pages...');
+        const preRes = await api.preprocessDocument(currentDoc.id);
+        if (!preRes.ok || !preRes.data) {
+          setError(preRes.error || 'Preprocessing failed.');
+          setIsProcessingAll(false);
+          return;
+        }
+        setPreprocessResult(preRes.data);
+        currentDoc = { ...currentDoc, status: 'preprocessed' };
+        setUploadedDoc(currentDoc);
+      }
+
+      // 2. OCR
+      if (!ocrResult) {
+        setProcessStepText('Step 2/8: Running layout-aware OCR extraction...');
+        const ocrRes = await api.runOcr(currentDoc.id);
+        if (!ocrRes.ok || !ocrRes.data) {
+          setError(ocrRes.error || 'OCR extraction failed.');
+          setIsProcessingAll(false);
+          return;
+        }
+        setOcrResult(ocrRes.data);
+        currentDoc = { ...currentDoc, status: 'ocr_completed' };
+        setUploadedDoc(currentDoc);
+      }
+
+      // 3. Classify
+      let currentClass = classificationResult;
+      if (!currentClass) {
+        setProcessStepText('Step 3/8: Classifying document archetype...');
+        const classRes = await api.classifyDocument(currentDoc.id);
+        if (!classRes.ok || !classRes.data) {
+          setError(classRes.error || 'Classification failed.');
+          setIsProcessingAll(false);
+          return;
+        }
+        currentClass = classRes.data;
+        setClassificationResult(currentClass);
+        currentDoc = {
+          ...currentDoc,
+          status: 'classified',
+          document_type: currentClass.document_type,
+        };
+        setUploadedDoc(currentDoc);
+      }
+
+      // Check Unknown Document Archetype
+      if (currentClass.document_type === 'unknown') {
+        // Unknown archetype: halt sections & extraction gracefully per requirements
+        setProcessStepText('Document archetype is Unknown. Downstream extraction safely skipped.');
+        setIsProcessingAll(false);
+        return;
+      }
+
+      // 4. Detect Sections
+      if (!sectionsResult) {
+        setProcessStepText('Step 4/8: Detecting logical document sections...');
+        const secRes = await api.detectSections(currentDoc.id);
+        if (!secRes.ok || !secRes.data) {
+          setSectionsError(secRes.error || 'Section detection failed.');
+          setIsProcessingAll(false);
+          return;
+        }
+        setSectionsResult(secRes.data);
+        currentDoc = { ...currentDoc, status: 'sectioned' };
+        setUploadedDoc(currentDoc);
+      }
+
+      // 5. Targeted Extraction
+      if (!extractionResult) {
+        setProcessStepText('Step 5/8: Extracting structured field schemas...');
+        const extRes = await api.extractFields(currentDoc.id);
+        if (!extRes.ok || !extRes.data) {
+          setExtractionError(extRes.error || 'Field extraction failed.');
+          setIsProcessingAll(false);
+          return;
+        }
+        setExtractionResult(extRes.data);
+        if (extRes.data.status !== 'skipped') {
+          currentDoc = { ...currentDoc, status: 'extracted' };
+          setUploadedDoc(currentDoc);
+        }
+      }
+
+      // 6. Normalization & Validation
+      setProcessStepText('Step 6/8: Running deterministic normalization & validation...');
+      const valRes = await api.validateDocument(currentDoc.id);
+      if (valRes.ok && valRes.data) {
+        setValidationResult(valRes.data);
+        currentDoc = { ...currentDoc, status: valRes.data.document_status };
+        setUploadedDoc(currentDoc);
+      } else {
+        setValidationError(valRes.error || 'Validation failed.');
+      }
+
+      // 7. Vision Fallback
+      if (!visionResult) {
+        setProcessStepText('Step 7/8: Evaluating low-confidence vision recovery...');
+        const visRes = await api.runVisionFallback(currentDoc.id);
+        if (visRes.ok && visRes.data) {
+          setVisionResult(visRes.data);
+          if (visRes.data.updated_validation) {
+            setValidationResult(visRes.data.updated_validation);
+            currentDoc = { ...currentDoc, status: visRes.data.updated_validation.document_status };
+            setUploadedDoc(currentDoc);
+          }
+        }
+      }
+
+      // 8. Summary & Actions
+      setProcessStepText('Step 8/8: Generating executive summary & operational action items...');
+      const insRes = await api.generateInsights(currentDoc.id);
+      if (insRes.ok && insRes.data) {
+        setSummaryResult(insRes.data.summary);
+        setActionsResult(insRes.data.actions);
+        if (insRes.data.document_status) {
+          setUploadedDoc((prev) => ({ ...prev, status: insRes.data.document_status }));
+        }
+      } else {
+        setInsightsError(insRes.error || 'Insights generation failed.');
+      }
+
+    } catch (err) {
+      setError(err.message || 'Error occurred during end-to-end processing.');
+    } finally {
+      setIsProcessingAll(false);
+      setProcessStepText('');
+    }
+  };
+
+  const toggleSection = (idx) => {
+    setExpandedSections((prev) => ({ ...prev, [idx]: !prev[idx] }));
+  };
+
+  const toggleField = (key) => {
+    setExpandedFields((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleReset = () => {
+    setSelectedFile(null);
+    setUploadedDoc(null);
+    setPreprocessResult(null);
+    setOcrResult(null);
+    setClassificationResult(null);
+    setSectionsResult(null);
+    setExtractionResult(null);
+    setValidationResult(null);
+    setVisionResult(null);
+    setSummaryResult(null);
+    setActionsResult(null);
+    setRunningOcr(false);
+    setClassifying(false);
+    setDetectingSections(false);
+    setExtracting(false);
+    setValidating(false);
+    setRecoveringVision(false);
+    setGeneratingInsights(false);
+    setIsProcessingAll(false);
+    setProcessStepText('');
+    setError(null);
+    setSectionsError(null);
+    setExtractionError(null);
+    setValidationError(null);
+    setVisionError(null);
+    setInsightsError(null);
+    setActionUpdatingId(null);
+    setExpandedSections({});
+    setExpandedFields({});
+    setFieldSearchFilter('');
+    setFieldStatusFilter('all');
+    if (inputRef.current) inputRef.current.value = '';
+  };
+
+  // Pipeline Stepper 11 Stages Definition
+  const isUnknownArchetype = classificationResult?.document_type === 'unknown';
+
+  const pipelineStages = useMemo(() => [
+    {
+      id: 'upload',
+      label: 'Upload',
+      status: uploadedDoc ? 'completed' : 'pending',
+    },
+    {
+      id: 'preprocess',
+      label: 'Preprocess',
+      status: preprocessing
+        ? 'active'
+        : preprocessResult || ocrResult || classificationResult
+          ? 'completed'
+          : 'pending',
+    },
+    {
+      id: 'ocr',
+      label: 'OCR',
+      status: runningOcr
+        ? 'active'
+        : ocrResult
+          ? 'completed'
+          : 'pending',
+    },
+    {
+      id: 'classify',
+      label: 'Classify',
+      status: classifying
+        ? 'active'
+        : classificationResult
+          ? 'completed'
+          : 'pending',
+    },
+    {
+      id: 'sections',
+      label: 'Sections',
+      status: isUnknownArchetype
+        ? 'skipped'
+        : detectingSections
+          ? 'active'
+          : sectionsResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'extract',
+      label: 'Extract',
+      status: isUnknownArchetype || extractionResult?.status === 'skipped'
+        ? 'skipped'
+        : extracting
+          ? 'active'
+          : extractionResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'normalize',
+      label: 'Normalize',
+      status: isUnknownArchetype || extractionResult?.status === 'skipped'
+        ? 'skipped'
+        : validating
+          ? 'active'
+          : validationResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'validate',
+      label: 'Validate',
+      status: isUnknownArchetype || extractionResult?.status === 'skipped'
+        ? 'skipped'
+        : validating
+          ? 'active'
+          : validationResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'vision_fallback',
+      label: 'Vision Fallback',
+      status: isUnknownArchetype || extractionResult?.status === 'skipped'
+        ? 'skipped'
+        : recoveringVision
+          ? 'active'
+          : visionResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'summary',
+      label: 'Summary',
+      status: isUnknownArchetype || summaryResult?.status === 'skipped'
+        ? 'skipped'
+        : generatingInsights
+          ? 'active'
+          : summaryResult
+            ? 'completed'
+            : 'pending',
+    },
+    {
+      id: 'actions',
+      label: 'Actions',
+      status: isUnknownArchetype || actionsResult?.status === 'skipped'
+        ? 'skipped'
+        : generatingInsights
+          ? 'active'
+          : actionsResult
+            ? 'completed'
+            : 'pending',
+    },
+  ], [
+    uploadedDoc,
+    preprocessing,
+    preprocessResult,
+    runningOcr,
+    ocrResult,
+    classifying,
+    classificationResult,
+    isUnknownArchetype,
+    detectingSections,
+    sectionsResult,
+    extracting,
+    extractionResult,
+    validating,
+    validationResult,
+    recoveringVision,
+    visionResult,
+    generatingInsights,
+    summaryResult,
+    actionsResult,
+  ]);
+
+  // Filtered Structured Fields for scanning
+  const rawFieldsList = validationResult?.fields || extractionResult?.fields || [];
+
+  const filteredFields = useMemo(() => {
+    return rawFieldsList.filter((f) => {
+      const matchSearch =
+        !fieldSearchFilter ||
+        f.field_name.toLowerCase().includes(fieldSearchFilter.toLowerCase()) ||
+        String(f.field_value ?? '').toLowerCase().includes(fieldSearchFilter.toLowerCase()) ||
+        String(f.normalized_value ?? '').toLowerCase().includes(fieldSearchFilter.toLowerCase());
+
+      if (!matchSearch) return false;
+
+      if (fieldStatusFilter === 'valid') return f.validation_status === 'valid' || f.validation_status === 'VALID';
+      if (fieldStatusFilter === 'review') return f.validation_status === 'needs_review';
+      if (fieldStatusFilter === 'conflict') return f.validation_status === 'conflict';
+      return true;
+    });
+  }, [rawFieldsList, fieldSearchFilter, fieldStatusFilter]);
+
+  // Actual API Overview Metrics (Requirement 3: Zero fake numbers)
+  const overviewDocType =
+    classificationResult?.document_type === 'invoice'
+      ? 'Invoice'
+      : classificationResult?.document_type === 'onboarding_form'
+        ? 'Onboarding Form'
+        : classificationResult?.document_type === 'unknown'
+          ? 'Unknown'
+          : uploadedDoc?.document_type
+            ? formatSectionTitle(uploadedDoc.document_type)
+            : 'Pending Classification';
+
+  const overviewStatus = uploadedDoc?.status ? uploadedDoc.status.replace('_', ' ') : 'uploaded';
+
+  const overviewPages =
+    preprocessResult?.page_count ||
+    ocrResult?.page_count ||
+    uploadedDoc?.page_count ||
+    1;
+
+  const overviewOcrConfidence =
+    ocrResult?.metadata?.average_confidence != null
+      ? `${ocrResult.metadata.average_confidence}%`
+      : ocrResult
+        ? 'Completed'
+        : 'Pending';
+
+  const overviewFieldCount =
+    isUnknownArchetype
+      ? '0 (Skipped)'
+      : validationResult?.fields?.length ?? extractionResult?.fields?.length ?? 0;
+
+  const overviewValidationStatus = isUnknownArchetype
+    ? 'Skipped'
+    : validationResult
+      ? validationResult.document_status === 'completed'
+        ? 'Valid'
+        : validationResult.summary?.conflict_count > 0
+          ? 'Conflicts'
+          : 'Needs Review'
+      : 'Pending';
+
+  const overviewActionCount = isUnknownArchetype
+    ? '0 (Skipped)'
+    : actionsResult?.total_actions ?? actionsResult?.actions?.length ?? 0;
+
   return (
-    <Card className="w-full max-w-xl mx-auto border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
+    <Card className={`w-full mx-auto border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left transition-all duration-300 ${uploadedDoc ? 'max-w-6xl' : 'max-w-xl'}`}>
       <CardHeader className="pb-3 border-b border-border/40">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <UploadCloud className="h-5 w-5 text-primary" />
-            <CardTitle className="text-base text-white">Document Ingestion</CardTitle>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
+              <UploadCloud className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base text-white flex items-center gap-2">
+                Document-to-Action Dashboard
+                {uploadedDoc && (
+                  <Badge variant="outline" className="text-[11px] font-mono border-primary/30 text-primary bg-primary/10">
+                    Live Session
+                  </Badge>
+                )}
+              </CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                {uploadedDoc
+                  ? `Active document inspection & execution • ID: ${uploadedDoc.id}`
+                  : 'Upload PDF, JPG, or PNG files up to 10 MB for end-to-end processing'}
+              </CardDescription>
+            </div>
           </div>
+
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 11 Pipeline
+            Phase 12 Unified Pipeline
           </Badge>
         </div>
-        <CardDescription className="text-xs text-muted-foreground">
-          Upload PDF, JPG, or PNG files up to 10 MB for safe pipeline storage
-        </CardDescription>
       </CardHeader>
 
-      <CardContent className="pt-5 space-y-4">
-        {/* Error Alert */}
+      <CardContent className="pt-5 space-y-6">
+        {/* Global Error Banner */}
         {error && (
-          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/25 p-3.5 text-xs text-rose-300">
             <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="flex-1">{error}</div>
+            <div className="flex-1 font-medium">{error}</div>
           </div>
         )}
 
-        {validationError && (
-          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="flex-1">{validationError}</div>
-          </div>
-        )}
-
-        {insightsError && (
-          <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-            <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="flex-1">{insightsError}</div>
-          </div>
-        )}
-
-        {/* Pipeline Step Progress Indicator */}
-        {uploadedDoc && (
-          <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 px-3 py-2 text-[11px] font-mono overflow-x-auto gap-1">
-            <div className="flex items-center gap-1 text-emerald-400 font-semibold shrink-0">
-              <CheckCircle2 className="h-3.5 w-3.5" /> Upload
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${preprocessResult ? 'text-emerald-400 font-semibold' : 'text-muted-foreground'}`}>
-              {preprocessResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />} Preprocess
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${ocrResult ? 'text-emerald-400 font-semibold' : (preprocessResult ? 'text-blue-400 font-semibold' : 'text-muted-foreground')}`}>
-              {ocrResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${preprocessResult ? 'bg-blue-400' : 'bg-slate-600'}`} />} OCR
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${classificationResult ? 'text-emerald-400 font-semibold' : (ocrResult ? 'text-purple-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
-              {classificationResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${ocrResult ? 'bg-purple-400' : 'bg-slate-600'}`} />} Classify
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${sectionsResult ? 'text-emerald-400 font-semibold' : (classificationResult ? (classificationResult.document_type === 'unknown' ? 'text-muted-foreground' : 'text-amber-400 font-semibold animate-pulse') : 'text-muted-foreground')}`}>
-              {sectionsResult ? <CheckCircle2 className="h-3.5 w-3.5" /> : <span className={`h-1.5 w-1.5 rounded-full ${classificationResult && classificationResult.document_type !== 'unknown' ? 'bg-amber-400' : 'bg-slate-600'}`} />} Sections
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${extractionResult ? (extractionResult.status === 'skipped' ? 'text-amber-400 font-semibold' : 'text-emerald-400 font-semibold') : (sectionsResult ? 'text-cyan-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
-              {extractionResult ? (extractionResult.status === 'skipped' ? <AlertCircle className="h-3.5 w-3.5 text-amber-400" /> : <CheckCircle2 className="h-3.5 w-3.5" />) : <span className={`h-1.5 w-1.5 rounded-full ${sectionsResult ? 'bg-cyan-400' : 'bg-slate-600'}`} />} Extract
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${validationResult ? (validationResult.document_status === 'completed' ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold') : (extractionResult && extractionResult.status !== 'skipped' ? 'text-emerald-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
-              {validationResult ? (validationResult.document_status === 'completed' ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-400" />) : <span className={`h-1.5 w-1.5 rounded-full ${extractionResult && extractionResult.status !== 'skipped' ? 'bg-emerald-400' : 'bg-slate-600'}`} />} Validate
-            </div>
-            <span className="text-muted-foreground/60 shrink-0">→</span>
-            <div className={`flex items-center gap-1 shrink-0 ${summaryResult && actionsResult ? 'text-emerald-400 font-semibold' : (validationResult ? 'text-amber-400 font-semibold animate-pulse' : 'text-muted-foreground')}`}>
-              {summaryResult && actionsResult ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <span className={`h-1.5 w-1.5 rounded-full ${validationResult ? 'bg-amber-400' : 'bg-slate-600'}`} />} Insights & Actions
-            </div>
-          </div>
-        )}
-
-        {/* State 1: Upload Success Result Card */}
+        {/* ============================================================ */}
+        {/* STATE 1: ACTIVE DOCUMENT DASHBOARD                          */}
+        {/* ============================================================ */}
         {uploadedDoc ? (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold">
-                <CheckCircle2 className="h-4 w-4" />
-                <span>
-                  {validationResult
-                    ? (validationResult.document_status === 'completed' ? "Deterministic validation passed" : "Validation requires review")
-                    : extractionResult
-                      ? (extractionResult.status === 'skipped' ? "Extraction skipped (Unknown archetype)" : "Fields extracted successfully")
-                      : sectionsResult
-                        ? "Sections detected"
-                        : classificationResult
-                          ? "Document classified"
-                          : preprocessResult
-                            ? "Document prepared for OCR"
-                            : "Document uploaded successfully"}
-                </span>
-              </div>
-              <Badge
-                variant={
-                  uploadedDoc.status === "completed"
-                    ? "success"
-                    : uploadedDoc.status === "needs_review"
-                      ? "warning"
-                      : uploadedDoc.status === "extracted"
-                        ? "success"
-                        : uploadedDoc.status === "sectioned"
-                          ? "warning"
-                          : uploadedDoc.status === "classified"
-                            ? "default"
-                            : uploadedDoc.status === "ocr_completed"
-                              ? "success"
-                              : uploadedDoc.status === "preprocessed"
-                                ? "secondary"
-                                : "outline"
-                }
-                className="capitalize text-xs font-mono"
-              >
-                Status: {uploadedDoc.status || "uploaded"}
-              </Badge>
-            </div>
-
-            <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 text-primary">
-                    {uploadedDoc.mime_type === "application/pdf" ? (
-                      <FileText className="h-5 w-5 text-red-400" />
+          <div className="space-y-6">
+            {/* 1. DOCUMENT HEADER & META BAR */}
+            <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-4">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                {/* File info */}
+                <div className="flex items-start gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary/10 border border-primary/20 shrink-0">
+                    {uploadedDoc.mime_type === 'application/pdf' ? (
+                      <FileText className="h-6 w-6 text-red-400" />
                     ) : (
-                      <ImageIcon className="h-5 w-5 text-blue-400" />
+                      <ImageIcon className="h-6 w-6 text-blue-400" />
                     )}
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-white truncate max-w-[260px] sm:max-w-[320px]">
-                      {uploadedDoc.filename}
-                    </h4>
-                    <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-base font-bold text-white break-all">
+                        {uploadedDoc.filename}
+                      </h3>
+                      <span className={`text-[10px] px-2 py-0.5 rounded border font-semibold ${getFileTypeBadge(uploadedDoc.filename, uploadedDoc.mime_type).color}`}>
+                        {getFileTypeBadge(uploadedDoc.filename, uploadedDoc.mime_type).label}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <span>{formatBytes(uploadedDoc.file_size)}</span>
                       <span>•</span>
-                      <span className="capitalize">{uploadedDoc.document_type || "Unknown Type"}</span>
+                      <span className="font-mono text-slate-300">ID: {uploadedDoc.id.slice(0, 8)}...</span>
+                      {uploadedDoc.storage_path && (
+                        <>
+                          <span>•</span>
+                          <span className="truncate max-w-[200px] text-slate-400">Path: {uploadedDoc.storage_path}</span>
+                        </>
+                      )}
                     </div>
                   </div>
+                </div>
+
+                {/* Primary Dashboard Actions */}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {/* END-TO-END PROCESS DOCUMENT BUTTON */}
+                  <Button
+                    size="sm"
+                    onClick={handleProcessDocument}
+                    disabled={isProcessingAll}
+                    className="text-xs font-semibold gap-1.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-500/25 cursor-pointer"
+                  >
+                    {isProcessingAll ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Processing Pipeline...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="h-3.5 w-3.5 fill-amber-300 text-amber-300" />
+                        <span>Process Document</span>
+                      </>
+                    )}
+                  </Button>
+
+                  {uploadedDoc.preview_url && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      asChild
+                      className="text-xs gap-1.5"
+                    >
+                      <a
+                        href={uploadedDoc.preview_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Preview
+                      </a>
+                    </Button>
+                  )}
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleReset}
+                    disabled={isProcessingAll}
+                    className="text-xs gap-1.5 text-muted-foreground hover:text-white"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Reset
+                  </Button>
                 </div>
               </div>
 
-              {/* Preprocessed Details Badge / Banner */}
-              {preprocessResult && !ocrResult && (
-                <div className="rounded-lg border border-indigo-500/20 bg-indigo-950/20 p-2.5 text-[11px] font-mono text-muted-foreground space-y-1.5">
-                  <div className="flex items-center justify-between text-indigo-300 font-semibold">
-                    <span className="flex items-center gap-1.5">
-                      <Layers className="h-3.5 w-3.5" /> Pages Generated:
-                    </span>
-                    <span>{preprocessResult.page_count} Pages</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Format:</span>
-                    <span className="text-slate-200">
-                      {preprocessResult.mime_type?.includes("pdf") ? "PDF (200 DPI PNGs)" : "Normalized PNG"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Processing Duration:</span>
-                    <span className="text-slate-200">{preprocessResult.metadata?.processing_duration_ms} ms</span>
-                  </div>
+              {/* End-to-End Live Processing Indicator */}
+              {isProcessingAll && processStepText && (
+                <div className="flex items-center gap-2.5 rounded-lg border border-indigo-500/30 bg-indigo-950/20 p-2.5 text-xs text-indigo-300 font-mono">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400 shrink-0" />
+                  <span className="font-semibold">{processStepText}</span>
                 </div>
               )}
+            </div>
 
-              {/* OCR Results Panel */}
-              {ocrResult && (
-                <div className="rounded-lg border border-blue-500/30 bg-blue-950/20 p-3 text-xs font-mono space-y-2.5">
-                  <div className="flex items-center justify-between text-blue-300 font-semibold border-b border-blue-500/20 pb-2">
-                    <span className="flex items-center gap-1.5 text-emerald-400">
-                      <CheckCircle2 className="h-4 w-4" /> OCR Completed
-                    </span>
-                    <span className="text-[11px] text-blue-300 font-mono">
-                      Engine: {ocrResult.metadata?.ocr_engine || 'Tesseract'}
-                    </span>
+            {/* 2. PIPELINE STEPPER: 11 STAGES */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+                <span className="flex items-center gap-1.5 text-primary">
+                  <Layers className="h-3.5 w-3.5" /> End-to-End Pipeline Workflow
+                </span>
+                <span className="text-[11px] font-mono text-muted-foreground">
+                  11 Execution Stages
+                </span>
+              </div>
+
+              <div className="rounded-xl border border-border/50 bg-background/50 p-3 overflow-x-auto">
+                <div className="flex items-center justify-between min-w-[760px] gap-1 text-[11px] font-mono">
+                  {pipelineStages.map((stage, idx) => {
+                    const isLast = idx === pipelineStages.length - 1;
+                    const isDone = stage.status === 'completed';
+                    const isActive = stage.status === 'active';
+                    const isSkipped = stage.status === 'skipped';
+
+                    return (
+                      <React.Fragment key={stage.id}>
+                        <div
+                          className={`flex items-center gap-1.5 px-2 py-1 rounded-md transition-all shrink-0 ${
+                            isDone
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                              : isActive
+                                ? 'bg-primary/15 text-primary border border-primary/30 animate-pulse font-bold'
+                                : isSkipped
+                                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                  : 'bg-muted/30 text-muted-foreground/70 border border-border/30'
+                          }`}
+                        >
+                          {isDone ? (
+                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                          ) : isActive ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                          ) : isSkipped ? (
+                            <Ban className="h-3.5 w-3.5 text-amber-400" />
+                          ) : (
+                            <span className="h-2 w-2 rounded-full bg-slate-600" />
+                          )}
+                          <span>{stage.label}</span>
+                          {isSkipped && (
+                            <span className="text-[9px] uppercase font-bold text-amber-400/80">
+                              (Skipped)
+                            </span>
+                          )}
+                        </div>
+
+                        {!isLast && (
+                          <span className="text-muted-foreground/40 shrink-0 select-none">
+                            →
+                          </span>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* 3. DOCUMENT OVERVIEW: 7 ACTUAL METRICS (Requirement 3) */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                <FileCheck className="h-3.5 w-3.5 text-primary" /> Document Overview
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5 text-center font-mono">
+                {/* 1. Document Type */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Doc Type</div>
+                  <div className="text-xs font-bold text-white capitalize truncate mt-0.5" title={overviewDocType}>
+                    {overviewDocType}
+                  </div>
+                </div>
+
+                {/* 2. Status */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Status</div>
+                  <div className="text-xs font-bold text-primary capitalize truncate mt-0.5" title={overviewStatus}>
+                    {overviewStatus}
+                  </div>
+                </div>
+
+                {/* 3. Pages */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Pages</div>
+                  <div className="text-sm font-bold text-white mt-0.5">{overviewPages}</div>
+                </div>
+
+                {/* 4. OCR Confidence */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">OCR Conf.</div>
+                  <div className="text-sm font-bold text-emerald-400 mt-0.5">{overviewOcrConfidence}</div>
+                </div>
+
+                {/* 5. Extracted Fields */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Fields</div>
+                  <div className="text-sm font-bold text-cyan-300 mt-0.5">{overviewFieldCount}</div>
+                </div>
+
+                {/* 6. Validation Status */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Validation</div>
+                  <div className={`text-xs font-bold mt-0.5 truncate ${
+                    overviewValidationStatus === 'Valid'
+                      ? 'text-emerald-400'
+                      : overviewValidationStatus === 'Conflicts'
+                        ? 'text-rose-400'
+                        : overviewValidationStatus === 'Needs Review'
+                          ? 'text-amber-400'
+                          : 'text-muted-foreground'
+                  }`}>
+                    {overviewValidationStatus}
+                  </div>
+                </div>
+
+                {/* 7. Action Count */}
+                <div className="rounded-lg bg-background/60 p-2.5 border border-border/50">
+                  <div className="text-[10px] text-muted-foreground uppercase">Actions</div>
+                  <div className="text-sm font-bold text-amber-300 mt-0.5">{overviewActionCount}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* UNKNOWN DOCUMENT NOTICE (Requirement 2 & 12) */}
+            {isUnknownArchetype && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-950/20 p-4 space-y-2 text-left">
+                <div className="flex items-center gap-2 text-amber-300 font-bold text-sm">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                  <span>Document Archetype Evaluation: Unsupported / Unknown</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-xs font-mono">
+                  <div className="rounded bg-background/70 p-2 border border-amber-500/30">
+                    <span className="text-muted-foreground block text-[10px] uppercase">Classification:</span>
+                    <span className="text-amber-300 font-bold">Unknown</span>
+                  </div>
+                  <div className="rounded bg-background/70 p-2 border border-amber-500/30">
+                    <span className="text-muted-foreground block text-[10px] uppercase">Reason:</span>
+                    <span className="text-slate-200">Unsupported document type</span>
+                  </div>
+                  <div className="rounded bg-background/70 p-2 border border-amber-500/30">
+                    <span className="text-muted-foreground block text-[10px] uppercase">Sections & Extraction:</span>
+                    <span className="text-amber-400 font-semibold">Skipped</span>
+                  </div>
+                </div>
+                <p className="text-xs text-amber-200/80 leading-relaxed pt-1">
+                  This document does not match recognized structured schemas (Invoices or Onboarding Forms).
+                  In accordance with the pipeline safety policy, sections, field extraction, validation, and insights
+                  were safely skipped to prevent hallucinated data.
+                </p>
+              </div>
+            )}
+
+            {/* INDIVIDUAL CONTROLS STRIP (Preserves manual testing & granular demonstration) */}
+            <div className="rounded-lg border border-border/40 bg-background/40 p-3 space-y-2">
+              <div className="text-[11px] font-semibold text-muted-foreground uppercase flex items-center justify-between">
+                <span>Manual Stage Trigger Controls</span>
+                <span className="text-[10px] text-muted-foreground">Individual inspection</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {!preprocessResult && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handlePreprocess}
+                    disabled={preprocessing || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {preprocessing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layers className="h-3.5 w-3.5 text-indigo-400" />}
+                    Prepare for OCR
+                  </Button>
+                )}
+
+                {!ocrResult && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleRunOcr}
+                    disabled={runningOcr || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {runningOcr ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanText className="h-3.5 w-3.5 text-blue-400" />}
+                    Run OCR
+                  </Button>
+                )}
+
+                {!classificationResult && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleClassify}
+                    disabled={classifying || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {classifying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Brain className="h-3.5 w-3.5 text-purple-400" />}
+                    Classify Document
+                  </Button>
+                )}
+
+                {!isUnknownArchetype && !sectionsResult && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleDetectSections}
+                    disabled={detectingSections || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {detectingSections ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderTree className="h-3.5 w-3.5 text-amber-400" />}
+                    Detect Sections
+                  </Button>
+                )}
+
+                {!isUnknownArchetype && !extractionResult && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleExtractFields}
+                    disabled={extracting || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {extracting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-cyan-400" />}
+                    Extract Fields
+                  </Button>
+                )}
+
+                {!isUnknownArchetype && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleValidate}
+                    disabled={validating || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {validating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />}
+                    {validationResult ? 'Re-Validate' : 'Normalize & Validate'}
+                  </Button>
+                )}
+
+                {!isUnknownArchetype && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleVisionFallback}
+                    disabled={recoveringVision || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {recoveringVision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5 text-indigo-400" />}
+                    Vision Fallback
+                  </Button>
+                )}
+
+                {!isUnknownArchetype && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleGenerateInsights}
+                    disabled={generatingInsights || isProcessingAll}
+                    className="text-xs gap-1.5"
+                  >
+                    {generatingInsights ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListTodo className="h-3.5 w-3.5 text-purple-400" />}
+                    {summaryResult && actionsResult ? 'Regenerate Insights' : 'Summary & Actions'}
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* STAGE ERROR BANNERS */}
+            {sectionsError && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">{sectionsError}</div>
+              </div>
+            )}
+            {extractionError && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">{extractionError}</div>
+              </div>
+            )}
+            {validationError && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">{validationError}</div>
+              </div>
+            )}
+            {visionError && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">{visionError}</div>
+              </div>
+            )}
+            {insightsError && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
+                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="flex-1">{insightsError}</div>
+              </div>
+            )}
+
+            {/* MAIN DASHBOARD CONTENT GRID (Left: Data & Validation, Right: Summary & Actions) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* LEFT COLUMN: STRUCTURED DATA & VALIDATION (7 COLS ON DESKTOP) */}
+              <div className="lg:col-span-7 space-y-6">
+                {/* 4. STRUCTURED DATA VIEW (Requirement 4) */}
+                <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-border/40 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-cyan-400" />
+                      <h4 className="text-sm font-bold text-white">Structured Data View</h4>
+                      <Badge variant="outline" className="text-[11px] font-mono border-cyan-500/30 text-cyan-300 bg-cyan-500/10">
+                        {filteredFields.length} / {rawFieldsList.length} Fields
+                      </Badge>
+                    </div>
+
+                    {/* Quick Search & Filters */}
+                    {rawFieldsList.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <div className="relative">
+                          <Search className="h-3 w-3 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                          <input
+                            type="text"
+                            placeholder="Filter field..."
+                            value={fieldSearchFilter}
+                            onChange={(e) => setFieldSearchFilter(e.target.value)}
+                            className="text-[11px] font-mono pl-6 pr-2 py-1 rounded border border-border/50 bg-background text-slate-200 placeholder:text-muted-foreground w-28 sm:w-36 focus:outline-none focus:border-primary"
+                          />
+                        </div>
+                        <select
+                          value={fieldStatusFilter}
+                          onChange={(e) => setFieldStatusFilter(e.target.value)}
+                          className="text-[11px] font-mono px-2 py-1 rounded border border-border/50 bg-background text-slate-300 focus:outline-none"
+                        >
+                          <option value="all">All</option>
+                          <option value="valid">Valid</option>
+                          <option value="review">Needs Review</option>
+                          <option value="conflict">Conflicts</option>
+                        </select>
+                      </div>
+                    )}
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2 py-0.5 text-center">
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Pages</div>
-                      <div className="text-sm font-bold text-white">{ocrResult.page_count}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Text Blocks</div>
-                      <div className="text-sm font-bold text-white">{ocrResult.metadata?.block_count ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Avg Confidence</div>
-                      <div className="text-sm font-bold text-emerald-400">
-                        {ocrResult.metadata?.average_confidence != null
-                          ? `${ocrResult.metadata.average_confidence}%`
-                          : 'N/A'}
+                  {/* Empty state or fields list */}
+                  {rawFieldsList.length === 0 ? (
+                    <div className="rounded-lg bg-card/40 border border-border/40 p-6 text-center text-xs text-muted-foreground space-y-1">
+                      <Sparkles className="h-6 w-6 text-muted-foreground mx-auto mb-1 opacity-50" />
+                      <div>No structured fields extracted yet.</div>
+                      <div className="text-[11px]">
+                        {isUnknownArchetype
+                          ? 'Extraction skipped for unknown document archetypes.'
+                          : 'Run targeted extraction or click "Process Document" to populate fields.'}
                       </div>
                     </div>
+                  ) : filteredFields.length === 0 ? (
+                    <div className="rounded-lg bg-card/40 border border-border/40 p-4 text-center text-xs text-muted-foreground">
+                      No fields match filter &quot;{fieldSearchFilter}&quot;
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
+                      {filteredFields.map((field, idx) => {
+                        const fieldKey = `fld_${field.field_name}_${idx}`;
+                        const isExpanded = !!expandedFields[fieldKey];
+                        const isKeyField = KEY_FIELDS.has(field.field_name.toLowerCase());
+                        const isConflict = field.validation_status === 'conflict';
+                        const isNeedsReview = field.validation_status === 'needs_review';
+                        const isValid = field.validation_status === 'valid' || field.validation_status === 'VALID';
+                        const displayVal = field.normalized_value ?? field.field_value;
+                        const isNull = displayVal === null || displayVal === undefined || String(displayVal).trim() === '';
+
+                        return (
+                          <div
+                            key={fieldKey}
+                            className={`rounded-lg border p-3 text-xs space-y-2 transition-all ${
+                              isConflict
+                                ? 'border-rose-500/50 bg-rose-950/15'
+                                : isNeedsReview
+                                  ? 'border-amber-500/40 bg-amber-950/15'
+                                  : isKeyField
+                                    ? 'border-cyan-500/40 bg-cyan-950/10'
+                                    : 'border-border/50 bg-background/60 hover:border-border'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              {/* Field Name & Section */}
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleField(fieldKey)}
+                                  className="text-muted-foreground hover:text-white transition-colors cursor-pointer p-0.5"
+                                  title="Toggle provenance details"
+                                >
+                                  {isExpanded ? (
+                                    <ChevronDown className="h-3.5 w-3.5 text-primary" />
+                                  ) : (
+                                    <ChevronRight className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                                <span className={`font-semibold text-white truncate ${isKeyField ? 'text-cyan-200' : ''}`}>
+                                  {formatFieldName(field.field_name)}
+                                </span>
+                                {field.section_name && (
+                                  <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.2 rounded bg-muted/40 shrink-0 hidden sm:inline">
+                                    {field.section_name}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Confidence, Source & Validation Status Badges */}
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {/* Validation Status */}
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[9px] uppercase px-1.5 py-0.2 font-bold ${
+                                    isConflict
+                                      ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+                                      : isNeedsReview
+                                        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                                        : isValid
+                                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                                          : 'border-border/60 text-muted-foreground'
+                                  }`}
+                                >
+                                  {field.validation_status ? field.validation_status.toUpperCase() : 'EXTRACTED'}
+                                </Badge>
+
+                                {/* Confidence Score */}
+                                {field.confidence != null && (
+                                  <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${
+                                    field.confidence >= 0.8
+                                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                      : 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                                  }`}>
+                                    {Math.round(field.confidence * 100)}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Value Display Row */}
+                            <div className="pl-5 text-[11px] font-mono flex items-baseline justify-between gap-2">
+                              <div className="flex-1 break-all">
+                                {isNull ? (
+                                  <span className="text-muted-foreground italic">
+                                    null (strict null policy)
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-100 font-medium">
+                                    {String(displayVal)}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Source badge */}
+                              <span className="text-[10px] text-muted-foreground capitalize shrink-0">
+                                {field.source || 'gemini'} (P{field.page_number || 1})
+                              </span>
+                            </div>
+
+                            {/* Validation message if issue detected */}
+                            {field.validation_message && (
+                              <div className={`ml-5 p-1.5 rounded text-[11px] flex items-center gap-1.5 border ${
+                                isConflict
+                                  ? 'bg-rose-950/30 text-rose-300 border-rose-500/30'
+                                  : 'bg-amber-950/30 text-amber-300 border-amber-500/30'
+                              }`}>
+                                <AlertCircle className="h-3 w-3 shrink-0" />
+                                <span>{field.validation_message}</span>
+                              </div>
+                            )}
+
+                            {/* Expandable Provenance Detail */}
+                            {isExpanded && (
+                              <div className="mt-2 ml-5 p-2 rounded bg-muted/30 border border-border/30 text-[10px] font-mono text-muted-foreground space-y-1">
+                                <div><span className="text-slate-400">Canonical Key:</span> {field.field_name}</div>
+                                <div><span className="text-slate-400">Source:</span> {field.source || 'gemini'} (Page {field.page_number || 1})</div>
+                                {field.field_value != null && field.normalized_value != null && field.field_value !== field.normalized_value && (
+                                  <div>
+                                    <span className="text-slate-400">Raw OCR/AI:</span> {String(field.field_value)} → <span className="text-emerald-400 font-semibold">Normalized:</span> {String(field.normalized_value)}
+                                  </div>
+                                )}
+                                {field.source_text && (
+                                  <div className="pt-1">
+                                    <span className="text-slate-400">Grounded Source Text Excerpt:</span>
+                                    <div className="mt-0.5 p-1.5 rounded bg-background/80 text-slate-300 italic whitespace-pre-wrap select-text">
+                                      &quot;{field.source_text}&quot;
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Line Items Table (if invoice line items exist) */}
+                  {extractionResult?.section_data?.line_items?.items?.length > 0 && (
+                    <div className="pt-3 border-t border-border/40 space-y-2">
+                      <div className="text-xs font-semibold text-cyan-300 flex items-center gap-1.5">
+                        <FileSpreadsheet className="h-3.5 w-3.5" />
+                        Line Items Breakdown ({extractionResult.section_data.line_items.items.length})
+                      </div>
+                      <div className="overflow-x-auto rounded-lg border border-border/40 bg-background/40">
+                        <table className="w-full text-left text-[11px] font-mono">
+                          <thead>
+                            <tr className="border-b border-border/40 text-muted-foreground bg-muted/20">
+                              <th className="p-2">Description</th>
+                              <th className="p-2 text-right">Qty</th>
+                              <th className="p-2 text-right">Unit Price</th>
+                              <th className="p-2 text-right">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {extractionResult.section_data.line_items.items.map((item, i) => (
+                              <tr key={i} className="border-b border-border/20 last:border-0 hover:bg-white/5">
+                                <td className="p-2 text-slate-200">{item.description || '—'}</td>
+                                <td className="p-2 text-right text-slate-300">{item.quantity ?? '—'}</td>
+                                <td className="p-2 text-right text-slate-300">{item.unit_price != null ? `$${item.unit_price}` : '—'}</td>
+                                <td className="p-2 text-right font-semibold text-cyan-400">{item.total_amount != null ? `$${item.total_amount}` : '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 7. VALIDATION SUMMARY & MESSAGES (Requirement 7: No synthetic score) */}
+                <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                      <h4 className="text-sm font-bold text-white">Validation</h4>
+                    </div>
+                    {validationResult && (
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] font-mono uppercase px-2 py-0.5 ${
+                          validationResult.document_status === 'completed'
+                            ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/30'
+                            : 'bg-amber-600/20 text-amber-300 border-amber-500/30'
+                        }`}
+                      >
+                        {validationResult.document_status === 'completed' ? 'Valid' : 'Needs Review'}
+                      </Badge>
+                    )}
                   </div>
 
-                  {/* Extracted Text Preview */}
-                  <div className="pt-2 border-t border-border/40 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-slate-200">Extracted Text</span>
+                  {validationResult ? (
+                    <div className="space-y-3">
+                      {/* Compact Validation Summary: Valid, Needs Review, Conflicts */}
+                      <div className="grid grid-cols-3 gap-2 text-center font-mono">
+                        <div className="rounded-lg bg-background/60 p-2.5 border border-emerald-500/30">
+                          <div className="text-[10px] text-emerald-400/80 uppercase font-semibold">Valid</div>
+                          <div className="text-base font-bold text-emerald-400">
+                            {validationResult.summary?.valid_count ?? 0}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-background/60 p-2.5 border border-amber-500/30">
+                          <div className="text-[10px] text-amber-400/80 uppercase font-semibold">Needs Review</div>
+                          <div className="text-base font-bold text-amber-400">
+                            {validationResult.summary?.needs_review_count ?? 0}
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-background/60 p-2.5 border border-rose-500/30">
+                          <div className="text-[10px] text-rose-400/80 uppercase font-semibold">Conflicts</div>
+                          <div className="text-base font-bold text-rose-400">
+                            {validationResult.summary?.conflict_count ?? 0}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Relevant Validation Messages */}
+                      {validationResult.validation_issues?.length > 0 ? (
+                        <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 space-y-2 text-xs">
+                          <div className="font-semibold text-amber-300 flex items-center gap-1.5">
+                            <AlertCircle className="h-3.5 w-3.5" />
+                            Validation Issues ({validationResult.validation_issues.length}):
+                          </div>
+                          <div className="space-y-1.5">
+                            {validationResult.validation_issues.map((issue, idx) => (
+                              <div key={idx} className="flex items-start gap-2 bg-background/70 p-2 rounded border border-amber-500/20">
+                                <span className={`px-1.5 py-0.2 rounded text-[9px] uppercase font-bold shrink-0 ${
+                                  issue.status === 'conflict' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'
+                                }`}>
+                                  {issue.status}
+                                </span>
+                                <div className="flex-1 text-[11px]">
+                                  <span className="font-semibold text-slate-200">{formatFieldName(issue.field_name)}:</span>{' '}
+                                  <span className="text-slate-300">{issue.message}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg bg-emerald-950/20 border border-emerald-500/30 p-2.5 text-xs text-emerald-300 flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                          <span>All deterministic business rules, arithmetic checks, and required field constraints passed.</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground italic py-2 text-center">
+                      Deterministic validation not yet executed. Click &quot;Normalize &amp; Validate&quot; or &quot;Process Document&quot;.
+                    </div>
+                  )}
+                </div>
+
+                {/* 8. VISION FALLBACK PANEL (Requirement 8) */}
+                <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
+                  <div className="flex items-center justify-between border-b border-border/40 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Eye className="h-4 w-4 text-indigo-400" />
+                      <h4 className="text-sm font-bold text-white">Vision Fallback</h4>
+                    </div>
+                    {visionResult && (
+                      <Badge variant="outline" className="text-[10px] uppercase font-mono border-indigo-500/40 text-indigo-300 bg-indigo-500/10">
+                        {visionResult.status}
+                      </Badge>
+                    )}
+                  </div>
+
+                  {visionResult ? (
+                    visionResult.fallback_fields?.length > 0 ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
+                          <div className="rounded bg-background/60 p-2 border border-border/40">
+                            <div className="text-[10px] text-muted-foreground uppercase">Candidates</div>
+                            <div className="text-sm font-bold text-white">{visionResult.candidates_identified ?? 0}</div>
+                          </div>
+                          <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
+                            <div className="text-[10px] text-emerald-400/80 uppercase">Recovered</div>
+                            <div className="text-sm font-bold text-emerald-400">{visionResult.fields_recovered ?? 0}</div>
+                          </div>
+                          <div className="rounded bg-background/60 p-2 border border-rose-500/30">
+                            <div className="text-[10px] text-rose-400/80 uppercase">Conflicts</div>
+                            <div className="text-sm font-bold text-rose-400">{visionResult.conflicts_detected ?? 0}</div>
+                          </div>
+                        </div>
+
+                        {/* Fallback Comparison Cards: OCR Value, Vision Value, Source, Confidence, Status */}
+                        <div className="space-y-2">
+                          {visionResult.fallback_fields.map((fb, idx) => (
+                            <div
+                              key={idx}
+                              className="rounded-lg bg-background/70 p-3 border border-border/50 text-xs space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-slate-200">
+                                  {formatFieldName(fb.field_name)}
+                                </span>
+                                <Badge variant="outline" className="text-[9px] uppercase font-bold px-1.5 py-0.2 border-indigo-500/40 text-indigo-300">
+                                  {fb.action_taken}
+                                </Badge>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                                <div className="rounded bg-background/60 p-2 border border-border/30">
+                                  <div className="text-[9px] text-muted-foreground uppercase flex justify-between">
+                                    <span>OCR Value</span>
+                                    {fb.ocr_confidence != null && <span>{Math.round(fb.ocr_confidence * 100)}%</span>}
+                                  </div>
+                                  <div className="text-slate-300 break-all font-medium mt-0.5">
+                                    {fb.ocr_value != null ? String(fb.ocr_value) : <span className="italic text-muted-foreground">null</span>}
+                                  </div>
+                                </div>
+
+                                <div className="rounded bg-background/60 p-2 border border-border/30">
+                                  <div className="text-[9px] text-indigo-400 uppercase flex justify-between">
+                                    <span>Vision Value</span>
+                                    {fb.vision_confidence != null && <span>{Math.round(fb.vision_confidence * 100)}%</span>}
+                                  </div>
+                                  <div className="text-indigo-200 break-all font-medium mt-0.5">
+                                    {fb.vision_value != null ? String(fb.vision_value) : <span className="italic text-muted-foreground">null</span>}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {fb.reason && (
+                                <div className="text-[10px] text-slate-400 italic bg-muted/20 p-1.5 rounded">
+                                  Reason: {fb.reason}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="rounded-lg bg-card/40 border border-border/40 p-4 text-center text-xs text-muted-foreground space-y-1">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400 mx-auto mb-1" />
+                        <div className="text-slate-200 font-medium">Vision fallback not required</div>
+                        <div className="text-[11px]">All extracted fields satisfied confidence thresholds without visual recovery.</div>
+                      </div>
+                    )
+                  ) : (
+                    <div className="rounded-lg bg-card/40 border border-border/40 p-4 text-center text-xs text-muted-foreground">
+                      Vision fallback not required
+                    </div>
+                  )}
+                </div>
+
+                {/* RAW OCR INSPECTION TOGGLE */}
+                {ocrResult && (
+                  <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
+                    <div className="flex items-center justify-between border-b border-border/40 pb-2">
+                      <div className="flex items-center gap-2">
+                        <ScanText className="h-4 w-4 text-blue-400" />
+                        <h4 className="text-sm font-bold text-white">Raw OCR Text</h4>
+                      </div>
                       <div className="flex items-center gap-1 bg-background/80 p-0.5 rounded border border-border/40 text-[10px]">
                         <button
                           type="button"
                           onClick={() => setViewMode('full')}
-                          className={`px-2 py-0.5 rounded ${viewMode === 'full' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                          className={`px-2 py-0.5 rounded cursor-pointer ${viewMode === 'full' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
                         >
                           Full Text
                         </button>
                         <button
                           type="button"
                           onClick={() => setViewMode('blocks')}
-                          className={`px-2 py-0.5 rounded ${viewMode === 'blocks' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                          className={`px-2 py-0.5 rounded cursor-pointer ${viewMode === 'blocks' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
                         >
                           Blocks ({ocrResult.metadata?.block_count ?? 0})
                         </button>
@@ -682,7 +1657,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
                             </div>
                             <div className="shrink-0 flex items-center gap-1.5 text-[10px] font-mono">
                               <span className="text-muted-foreground">P{b.page_number}</span>
-                              <span className="text-muted-foreground">[{b.bbox.x},{b.bbox.y}]</span>
                               <span className={b.confidence != null && b.confidence >= 80 ? 'text-emerald-400' : 'text-amber-400'}>
                                 {b.confidence != null ? `${b.confidence}%` : 'N/A'}
                               </span>
@@ -692,1070 +1666,241 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       </div>
                     )}
                   </div>
-                </div>
-              )}
-
-              {/* Classification Results Panel */}
-              {classificationResult && (
-                <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3.5 text-xs font-mono space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-purple-500/20 pb-2">
-                    <div className="flex items-center gap-2 text-purple-300 font-semibold">
-                      <Brain className="h-4 w-4 text-purple-400" />
-                      <span>Document Classification</span>
-                    </div>
-                    <Badge
-                      variant={
-                        classificationResult.document_type === "invoice"
-                          ? "default"
-                          : classificationResult.document_type === "onboarding_form"
-                            ? "success"
-                            : "warning"
-                      }
-                      className="capitalize text-xs font-mono px-2 py-0.5"
-                    >
-                      {classificationResult.document_type === "invoice" && "Invoice"}
-                      {classificationResult.document_type === "onboarding_form" && "Onboarding Form"}
-                      {classificationResult.document_type === "unknown" && "Unknown"}
-                    </Badge>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 text-center">
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Document Archetype</div>
-                      <div className="text-sm font-bold capitalize text-white">
-                        {classificationResult.document_type.replace("_", " ")}
-                      </div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">AI Confidence</div>
-                      <div className="text-sm font-bold text-purple-300">
-                        {Math.round(classificationResult.confidence * 100)}%
-                      </div>
-                    </div>
-                  </div>
-
-                  {classificationResult.evidence?.length > 0 && (
-                    <div className="pt-2 border-t border-border/40 space-y-1">
-                      <div className="text-[11px] font-semibold text-slate-200">Classification Evidence:</div>
-                      <ul className="space-y-1">
-                        {classificationResult.evidence.map((ev, i) => (
-                          <li key={i} className="flex items-start gap-1.5 text-slate-300 text-[11px]">
-                            <span className="text-purple-400 font-bold">•</span>
-                            <span>{ev}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {classificationResult.document_type === "unknown" && (
-                    <div className="rounded bg-amber-500/10 border border-amber-500/20 p-2 text-[10px] text-amber-300 leading-relaxed">
-                      Document does not match supported archetypes (Invoice or Onboarding Form). It will be flagged for manual review or secondary routing.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Sections Detection Error */}
-              {sectionsError && (
-                <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                  <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                  <div className="flex-1">{sectionsError}</div>
-                </div>
-              )}
-
-              {/* Section Detection Results Card */}
-              {sectionsResult && (
-                <div className="rounded-xl border border-amber-500/30 bg-amber-950/10 p-3.5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <FolderTree className="h-4 w-4 text-amber-400" />
-                      <span className="text-xs font-semibold text-white">Document Sections</span>
-                    </div>
-                    <Badge
-                      variant="warning"
-                      className="text-[11px] font-mono px-2 py-0.5"
-                    >
-                      {sectionsResult.sections?.length || 0} Sections Found
-                    </Badge>
-                  </div>
-
-                  {sectionsResult.sections?.length === 0 ? (
-                    <div className="rounded-lg bg-background/50 border border-border/40 p-3 text-center text-xs text-muted-foreground">
-                      No logical sections extracted for this document archetype ({sectionsResult.document_type || "unknown"}).
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {sectionsResult.sections.map((section, idx) => {
-                        const isExpanded = !!expandedSections[idx];
-                        return (
-                          <div
-                            key={section.section_id || idx}
-                            className="rounded-lg border border-border/50 bg-background/60 overflow-hidden transition-colors hover:border-amber-500/40"
-                          >
-                            {/* Accordion Header */}
-                            <button
-                              type="button"
-                              onClick={() => toggleSection(idx)}
-                              className="w-full flex items-center justify-between p-2.5 text-left text-xs hover:bg-white/5 transition-colors cursor-pointer"
-                            >
-                              <div className="flex items-center gap-2 font-medium text-slate-200">
-                                {isExpanded ? (
-                                  <ChevronDown className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                                ) : (
-                                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                                )}
-                                <span className="font-semibold text-white">
-                                  {formatSectionTitle(section.section_name)}
-                                </span>
-                                <span className="text-[10px] font-mono text-muted-foreground">
-                                  (Page {section.page_number})
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                {section.block_ids?.length > 0 && (
-                                  <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.5 rounded bg-muted/40">
-                                    {section.block_ids.length} blocks
-                                  </span>
-                                )}
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] font-mono border-amber-500/30 text-amber-300 py-0"
-                                >
-                                  {Math.round((section.confidence || 0) * 100)}%
-                                </Badge>
-                              </div>
-                            </button>
-
-                            {/* Accordion Body */}
-                            {isExpanded && (
-                              <div className="p-3 pt-1 border-t border-border/40 bg-background/80 space-y-2">
-                                <div className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap rounded bg-muted/30 p-2.5 max-h-48 overflow-y-auto leading-relaxed">
-                                  {section.text || "No text in section"}
-                                </div>
-                                {section.bbox && (
-                                  <div className="text-[10px] font-mono text-muted-foreground">
-                                    BBox: [x={section.bbox.x}, y={section.bbox.y}, {section.bbox.width}x{section.bbox.height}]
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Extraction Error */}
-              {extractionError && (
-                <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                  <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                  <div className="flex-1">{extractionError}</div>
-                </div>
-              )}
-
-              {/* Extraction Results Card */}
-              {extractionResult && (
-                <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 p-3.5 space-y-3">
-                  <div className="flex items-center justify-between border-b border-cyan-500/20 pb-2.5">
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="h-4 w-4 text-cyan-400" />
-                      <span className="text-xs font-semibold text-white">Targeted AI Extraction</span>
-                    </div>
-                    <Badge
-                      variant={extractionResult.status === "skipped" ? "outline" : "success"}
-                      className={`text-[11px] font-mono px-2 py-0.5 ${extractionResult.status === "skipped" ? "border-amber-500/40 text-amber-300" : "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"}`}
-                    >
-                      {extractionResult.status === "skipped"
-                        ? "Skipped"
-                        : `${extractionResult.field_count || extractionResult.fields?.length || 0} Fields Extracted`}
-                    </Badge>
-                  </div>
-
-                  {extractionResult.status === "skipped" ? (
-                    <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-300 space-y-1">
-                      <div className="font-semibold flex items-center gap-1.5">
-                        <AlertCircle className="h-4 w-4" />
-                        Structured Extraction Skipped
-                      </div>
-                      <p className="text-[11px] text-amber-200/80">
-                        {extractionResult.reason || "Document archetype is unknown. Extraction requires a recognized document schema (Invoice or Onboarding Form)."}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {/* Extraction Meta Summary */}
-                      <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
-                        <div className="rounded bg-background/60 p-2 border border-border/40">
-                          <div className="text-[10px] text-muted-foreground uppercase">Fields Extracted</div>
-                          <div className="text-sm font-bold text-cyan-300">
-                            {extractionResult.field_count || extractionResult.fields?.length || 0}
-                          </div>
-                        </div>
-                        <div className="rounded bg-background/60 p-2 border border-border/40">
-                          <div className="text-[10px] text-muted-foreground uppercase">Sections Targeted</div>
-                          <div className="text-sm font-bold text-white">
-                            {Object.keys(extractionResult.section_data || {}).length}
-                          </div>
-                        </div>
-                        <div className="rounded bg-background/60 p-2 border border-border/40">
-                          <div className="text-[10px] text-muted-foreground uppercase">Model</div>
-                          <div className="text-xs font-bold text-emerald-400 truncate mt-0.5">
-                            {extractionResult.metadata?.model || 'Gemini 2.5'}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Extracted Fields List with Provenance */}
-                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                        {(extractionResult.fields || []).map((field, idx) => {
-                          const isExpanded = !!expandedFields[idx];
-                          const isNull = field.field_value === null || field.field_value === undefined;
-                          return (
-                            <div
-                              key={idx}
-                              className="rounded-lg border border-border/50 bg-background/60 p-2.5 space-y-1.5 transition-colors hover:border-cyan-500/30"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleField(idx)}
-                                    className="text-muted-foreground hover:text-white transition-colors cursor-pointer"
-                                    title="Toggle provenance details"
-                                  >
-                                    {isExpanded ? (
-                                      <ChevronDown className="h-3.5 w-3.5 text-cyan-400" />
-                                    ) : (
-                                      <ChevronRight className="h-3.5 w-3.5" />
-                                    )}
-                                  </button>
-                                  <span className="text-xs font-semibold text-white truncate">
-                                    {formatFieldName(field.field_name)}
-                                  </span>
-                                  <span className="text-[10px] font-mono text-muted-foreground px-1.5 py-0.2 rounded bg-muted/40 shrink-0">
-                                    {field.section_name}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center gap-2 shrink-0">
-                                  {field.confidence != null ? (
-                                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                      {Math.round(field.confidence * 100)}%
-                                    </span>
-                                  ) : (
-                                    <span className="text-[10px] font-mono text-muted-foreground">N/A</span>
-                                  )}
-                                </div>
-                              </div>
-
-                              <div className="pl-5 text-xs">
-                                {isNull ? (
-                                  <span className="text-muted-foreground italic font-mono text-[11px]">
-                                    null (strict null policy)
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-100 font-mono text-[11px] break-all">
-                                    {String(field.field_value)}
-                                  </span>
-                                )}
-                              </div>
-
-                              {/* Provenance Details */}
-                              {isExpanded && (
-                                <div className="mt-2 ml-5 p-2 rounded bg-muted/30 border border-border/30 text-[10px] font-mono text-muted-foreground space-y-1">
-                                  <div>
-                                    <span className="text-slate-400">Field Key:</span> {field.field_name}
-                                  </div>
-                                  <div>
-                                    <span className="text-slate-400">Source:</span> {field.source || 'gemini'} (Page {field.page_number || 1})
-                                  </div>
-                                  {field.source_text && (
-                                    <div>
-                                      <span className="text-slate-400">Source Text Excerpt:</span>
-                                      <div className="mt-0.5 p-1.5 rounded bg-background/80 text-slate-300 italic whitespace-pre-wrap">
-                                        &quot;{field.source_text}&quot;
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* Line Items Table if invoice line items exist */}
-                      {extractionResult.section_data?.line_items?.items?.length > 0 && (
-                        <div className="pt-2 border-t border-border/40 space-y-1.5">
-                          <div className="text-[11px] font-semibold text-cyan-300 flex items-center gap-1.5">
-                            <FileSpreadsheet className="h-3.5 w-3.5" />
-                            Extracted Line Items ({extractionResult.section_data.line_items.items.length})
-                          </div>
-                          <div className="overflow-x-auto rounded border border-border/40 bg-background/40">
-                            <table className="w-full text-left text-[11px] font-mono">
-                              <thead>
-                                <tr className="border-b border-border/40 text-muted-foreground bg-muted/20">
-                                  <th className="p-1.5">Description</th>
-                                  <th className="p-1.5 text-right">Qty</th>
-                                  <th className="p-1.5 text-right">Unit Price</th>
-                                  <th className="p-1.5 text-right">Total</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {extractionResult.section_data.line_items.items.map((item, i) => (
-                                  <tr key={i} className="border-b border-border/20 last:border-0 hover:bg-white/5">
-                                    <td className="p-1.5 text-slate-200">{item.description || '—'}</td>
-                                    <td className="p-1.5 text-right text-slate-300">{item.quantity ?? '—'}</td>
-                                    <td className="p-1.5 text-right text-slate-300">{item.unit_price != null ? `$${item.unit_price}` : '—'}</td>
-                                    <td className="p-1.5 text-right font-semibold text-cyan-400">{item.total_amount != null ? `$${item.total_amount}` : '—'}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Validation Results Panel */}
-              {validationResult && (
-                <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3 text-xs font-mono space-y-3">
-                  <div className="flex items-center justify-between border-b border-emerald-500/20 pb-2">
-                    <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                      <ShieldCheck className="h-4 w-4" />
-                      <span>Deterministic Validation Summary</span>
-                    </div>
-                    <Badge
-                      variant={validationResult.document_status === "completed" ? "success" : "warning"}
-                      className={`text-[10px] font-mono uppercase px-2 py-0.5 ${validationResult.document_status === "completed" ? "bg-emerald-600/20 text-emerald-300 border-emerald-500/30" : "bg-amber-600/20 text-amber-300 border-amber-500/30"}`}
-                    >
-                      {validationResult.document_status === "completed" ? "Document: Completed" : "Document: Needs Review"}
-                    </Badge>
-                  </div>
-
-                  {/* Summary Metric Counters */}
-                  <div className="grid grid-cols-4 gap-2 text-center">
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Total Fields</div>
-                      <div className="text-sm font-bold text-white">{validationResult.summary?.total_fields ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
-                      <div className="text-[10px] text-emerald-400/80 uppercase">Valid</div>
-                      <div className="text-sm font-bold text-emerald-400">{validationResult.summary?.valid_count ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-amber-500/30">
-                      <div className="text-[10px] text-amber-400/80 uppercase">Needs Review</div>
-                      <div className="text-sm font-bold text-amber-400">{validationResult.summary?.needs_review_count ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
-                      <div className="text-[10px] text-rose-400/80 uppercase">Conflicts</div>
-                      <div className="text-sm font-bold text-rose-400">{validationResult.summary?.conflict_count ?? 0}</div>
-                    </div>
-                  </div>
-
-                  {/* Validation Issues Alert Box if issues exist */}
-                  {validationResult.validation_issues?.length > 0 && (
-                    <div className="rounded border border-amber-500/30 bg-amber-950/20 p-2.5 space-y-1.5 text-[11px]">
-                      <div className="font-semibold text-amber-300 flex items-center gap-1.5">
-                        <AlertCircle className="h-3.5 w-3.5" />
-                        Issues Detected ({validationResult.validation_issues.length}):
-                      </div>
-                      <div className="space-y-1">
-                        {validationResult.validation_issues.map((issue, idx) => (
-                          <div key={idx} className="flex items-start gap-2 bg-background/50 p-1.5 rounded border border-amber-500/20">
-                            <span className={`px-1.5 py-0.2 rounded text-[9px] uppercase font-bold shrink-0 ${issue.status === 'conflict' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'}`}>
-                              {issue.status}
-                            </span>
-                            <div className="flex-1">
-                              <span className="font-semibold text-slate-200">{formatFieldName(issue.field_name)}:</span>{' '}
-                              <span className="text-slate-300">{issue.message}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Validated Fields List (Original vs Normalized) */}
-                  <div className="space-y-1.5 pt-1">
-                    <div className="text-[11px] font-semibold text-slate-200">
-                      Normalized & Validated Fields ({validationResult.fields?.length ?? 0})
-                    </div>
-                    <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                      {validationResult.fields?.map((field, idx) => {
-                        const isExpanded = expandedFields[`val_${field.field_name}_${idx}`];
-                        const isConflict = field.validation_status === 'conflict';
-                        const isNeedsReview = field.validation_status === 'needs_review';
-                        return (
-                          <div
-                            key={idx}
-                            className={`rounded bg-background/70 p-2 border text-[11px] transition-colors ${
-                              isConflict
-                                ? 'border-rose-500/40 bg-rose-950/10'
-                                : isNeedsReview
-                                  ? 'border-amber-500/40 bg-amber-950/10'
-                                  : 'border-border/40'
-                            }`}
-                          >
-                            <div
-                              onClick={() => toggleField(`val_${field.field_name}_${idx}`)}
-                              className="flex items-center justify-between gap-2 cursor-pointer select-none"
-                            >
-                              <div className="flex items-center gap-1.5 min-w-0">
-                                {isExpanded ? (
-                                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                                ) : (
-                                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                                )}
-                                <span className="font-semibold text-slate-200 truncate">
-                                  {formatFieldName(field.field_name)}
-                                </span>
-                              </div>
-
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <Badge
-                                  variant="outline"
-                                  className={`text-[9px] uppercase px-1.5 py-0.2 font-bold ${
-                                    isConflict
-                                      ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
-                                      : isNeedsReview
-                                        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
-                                        : 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
-                                  }`}
-                                >
-                                  {field.validation_status || 'VALID'}
-                                </Badge>
-                                {field.confidence != null && (
-                                  <span className="text-[10px] text-muted-foreground">
-                                    {Math.round(field.confidence * 100)}%
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Value Display: Original & Normalized */}
-                            <div className="mt-1.5 ml-5 grid grid-cols-2 gap-2 text-[10px] font-mono">
-                              <div className="rounded bg-background/60 p-1.5 border border-border/30">
-                                <span className="text-muted-foreground block text-[9px] uppercase">Original Value:</span>
-                                <span className="text-slate-200 break-all font-medium">
-                                  {field.field_value != null ? String(field.field_value) : <span className="text-muted-foreground italic">null</span>}
-                                </span>
-                              </div>
-                              <div className="rounded bg-background/60 p-1.5 border border-border/30">
-                                <span className="text-muted-foreground block text-[9px] uppercase">Normalized Value:</span>
-                                <span className="text-emerald-300 break-all font-medium">
-                                  {field.normalized_value != null ? String(field.normalized_value) : <span className="text-muted-foreground italic">null</span>}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Validation Message Callout */}
-                            {field.validation_message && (
-                              <div className={`mt-1.5 ml-5 p-1.5 rounded text-[10px] flex items-center gap-1.5 border ${
-                                isConflict ? 'bg-rose-950/30 text-rose-300 border-rose-500/30' : 'bg-amber-950/30 text-amber-300 border-amber-500/30'
-                              }`}>
-                                <AlertCircle className="h-3 w-3 shrink-0" />
-                                <span>{field.validation_message}</span>
-                              </div>
-                            )}
-
-                            {/* Expanded Provenance */}
-                            {isExpanded && (
-                              <div className="mt-2 ml-5 p-2 rounded bg-muted/30 border border-border/30 text-[10px] font-mono text-muted-foreground space-y-1">
-                                <div><span className="text-slate-400">Field Key:</span> {field.field_name}</div>
-                                <div><span className="text-slate-400">Source:</span> {field.source || 'gemini'} (Page {field.page_number || 1})</div>
-                                {field.source_text && (
-                                  <div>
-                                    <span className="text-slate-400">Source Text Excerpt:</span>
-                                    <div className="mt-0.5 p-1.5 rounded bg-background/80 text-slate-300 italic whitespace-pre-wrap">
-                                      &quot;{field.source_text}&quot;
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Vision Fallback Error Banner */}
-              {visionError && (
-                <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-2.5 text-xs text-destructive flex items-center gap-2">
-                  <AlertCircle className="h-4 w-4 shrink-0" />
-                  <span>{visionError}</span>
-                </div>
-              )}
-
-              {/* Phase 10: Vision Fallback Recovery Panel */}
-              {visionResult && (
-                <div className="rounded-lg border border-indigo-500/30 bg-indigo-950/20 p-3 text-xs font-mono space-y-2.5">
-                  <div className="flex items-center justify-between text-indigo-300 font-semibold border-b border-indigo-500/20 pb-2">
-                    <span className="flex items-center gap-1.5 text-indigo-300">
-                      <Eye className="h-4 w-4 text-indigo-400" /> Phase 10: Vision Recovery & Fallback
-                    </span>
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] uppercase font-mono border-indigo-500/40 text-indigo-300 bg-indigo-500/10"
-                    >
-                      {visionResult.status}
-                    </Badge>
-                  </div>
-
-                  {/* Summary Metric Counters */}
-                  <div className="grid grid-cols-3 gap-2 py-0.5 text-center">
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[10px] text-muted-foreground uppercase">Candidates</div>
-                      <div className="text-sm font-bold text-white">{visionResult.candidates_identified ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
-                      <div className="text-[10px] text-emerald-400/80 uppercase">Recovered</div>
-                      <div className="text-sm font-bold text-emerald-400">{visionResult.fields_recovered ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
-                      <div className="text-[10px] text-rose-400/80 uppercase">Conflicts</div>
-                      <div className="text-sm font-bold text-rose-400">{visionResult.conflicts_detected ?? 0}</div>
-                    </div>
-                  </div>
-
-                  {/* Fallback Outcomes List */}
-                  {visionResult.fallback_fields?.length > 0 ? (
-                    <div className="space-y-1.5 pt-1">
-                      <div className="text-[11px] font-semibold text-slate-200">
-                        Evaluated Fields ({visionResult.fallback_fields.length})
-                      </div>
-                      <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                        {visionResult.fallback_fields.map((fb, idx) => {
-                          const action = fb.action_taken;
-                          const isRecovered = action === 'recovered';
-                          const isConflict = action === 'conflict';
-                          const isAgreed = action === 'agreed';
-
-                          const badgeColor = isRecovered
-                            ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
-                            : isAgreed
-                              ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
-                              : isConflict
-                                ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
-                                : 'border-amber-500/50 bg-amber-500/10 text-amber-300';
-
-                          return (
-                            <div
-                              key={idx}
-                              className={`rounded bg-background/70 p-2 border text-[11px] space-y-1.5 ${
-                                isConflict
-                                  ? 'border-rose-500/40 bg-rose-950/10'
-                                  : isRecovered
-                                    ? 'border-emerald-500/40 bg-emerald-950/10'
-                                    : 'border-border/40'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-semibold text-slate-200 truncate">
-                                  {formatFieldName(fb.field_name)}
-                                </span>
-                                <Badge variant="outline" className={`text-[9px] uppercase font-bold px-1.5 py-0.2 ${badgeColor}`}>
-                                  {action}
-                                </Badge>
-                              </div>
-
-                              <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-                                <div className="rounded bg-background/60 p-1.5 border border-border/30">
-                                  <div className="text-[9px] text-muted-foreground uppercase flex justify-between">
-                                    <span>OCR Read:</span>
-                                    {fb.ocr_confidence != null && <span>{Math.round(fb.ocr_confidence * 100)}%</span>}
-                                  </div>
-                                  <span className="text-slate-300 break-all">
-                                    {fb.ocr_value != null ? String(fb.ocr_value) : <span className="italic text-muted-foreground">null</span>}
-                                  </span>
-                                </div>
-                                <div className="rounded bg-background/60 p-1.5 border border-border/30">
-                                  <div className="text-[9px] text-indigo-400 uppercase flex justify-between">
-                                    <span>Vision Read:</span>
-                                    {fb.vision_confidence != null && <span>{Math.round(fb.vision_confidence * 100)}%</span>}
-                                  </div>
-                                  <span className="text-indigo-200 break-all font-medium">
-                                    {fb.vision_value != null ? String(fb.vision_value) : <span className="italic text-muted-foreground">null</span>}
-                                  </span>
-                                </div>
-                              </div>
-
-                              {fb.reason && (
-                                <div className="text-[10px] text-slate-400 italic">
-                                  Reason: {fb.reason}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-muted-foreground italic text-center py-1">
-                      All fields satisfied confidence thresholds. No targeted vision recovery required.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Phase 11: Intelligent Document Summary Panel */}
-              {summaryResult && (
-                <div className="rounded-lg border border-purple-500/30 bg-purple-950/20 p-3 text-xs font-mono space-y-2.5">
-                  <div className="flex items-center justify-between text-purple-300 font-semibold border-b border-purple-500/20 pb-2">
-                    <span className="flex items-center gap-1.5 text-purple-300">
-                      <Sparkles className="h-4 w-4 text-purple-400" /> Phase 11: Document Summary
-                    </span>
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] uppercase font-mono border-purple-500/40 text-purple-300 bg-purple-500/10"
-                    >
-                      {summaryResult.document_type || 'Summary'}
-                    </Badge>
-                  </div>
-
-                  {/* Summary Text Narrative */}
-                  <div className="rounded bg-background/80 p-2.5 border border-border/40 text-slate-200 text-xs font-sans leading-relaxed">
-                    {summaryResult.summary_text}
-                  </div>
-
-                  {/* Key Points (Up to 5) */}
-                  {summaryResult.key_points?.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
-                      <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
-                        <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
-                        Key Points ({summaryResult.key_points.length})
-                      </div>
-                      <div className="space-y-1">
-                        {summaryResult.key_points.map((point, idx) => (
-                          <div
-                            key={idx}
-                            className="flex items-start gap-2 rounded bg-background/60 p-2 border border-border/30 text-[11px] text-slate-300 font-sans"
-                          >
-                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                            <span className="flex-1">{point}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Attention / Review Items (Up to 5) */}
-                  {summaryResult.review_items?.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
-                      <div className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
-                        <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
-                        Attention Required ({summaryResult.review_items.length})
-                      </div>
-                      <div className="space-y-1">
-                        {summaryResult.review_items.map((item, idx) => (
-                          <div
-                            key={idx}
-                            className="flex items-start gap-2 rounded bg-amber-950/20 p-2 border border-amber-500/30 text-[11px] text-amber-200 font-sans"
-                          >
-                            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0" />
-                            <span className="flex-1">{item}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Phase 11: Action Items Board */}
-              {actionsResult && (
-                <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3 text-xs font-mono space-y-2.5">
-                  <div className="flex items-center justify-between text-cyan-300 font-semibold border-b border-cyan-500/20 pb-2">
-                    <span className="flex items-center gap-1.5 text-cyan-300">
-                      <ListTodo className="h-4 w-4 text-cyan-400" /> Phase 11: Action Items
-                    </span>
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] font-mono border-cyan-500/40 text-cyan-300 bg-cyan-500/10"
-                    >
-                      {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0} / {actionsResult.total_actions ?? 0} Done
-                    </Badge>
-                  </div>
-
-                  {/* Summary Metric Counters */}
-                  <div className="grid grid-cols-4 gap-2 py-0.5 text-center">
-                    <div className="rounded bg-background/60 p-2 border border-border/40">
-                      <div className="text-[9px] text-muted-foreground uppercase">Total</div>
-                      <div className="text-sm font-bold text-white">{actionsResult.total_actions ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-rose-500/30">
-                      <div className="text-[9px] text-rose-400 uppercase">High Priority</div>
-                      <div className="text-sm font-bold text-rose-400">{actionsResult.high_priority_count ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-amber-500/30">
-                      <div className="text-[9px] text-amber-400 uppercase">Pending</div>
-                      <div className="text-sm font-bold text-amber-400">
-                        {actionsResult.actions?.filter((a) => a.status === 'pending').length ?? 0}
-                      </div>
-                    </div>
-                    <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
-                      <div className="text-[9px] text-emerald-400 uppercase">Completed</div>
-                      <div className="text-sm font-bold text-emerald-400">
-                        {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Actions List */}
-                  {actionsResult.actions?.length > 0 ? (
-                    <div className="space-y-2 pt-1">
-                      <div className="text-[11px] font-semibold text-slate-200">
-                        Extracted Tasks ({actionsResult.actions.length})
-                      </div>
-                      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                        {actionsResult.actions.map((act) => {
-                          const isHigh = act.priority === 'high';
-                          const isMed = act.priority === 'medium';
-                          const isCompleted = act.status === 'completed';
-                          const isInProgress = act.status === 'in_progress';
-                          const isUpdating = actionUpdatingId === act.id;
-
-                          return (
-                            <div
-                              key={act.id}
-                              className={`rounded-lg p-2.5 border text-[11px] space-y-2 transition-colors ${
-                                isCompleted
-                                  ? 'border-emerald-500/30 bg-emerald-950/10 opacity-75'
-                                  : isInProgress
-                                    ? 'border-blue-500/40 bg-blue-950/20'
-                                    : isHigh
-                                      ? 'border-rose-500/40 bg-rose-950/15'
-                                      : 'border-border/40 bg-background/70'
-                              }`}
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex items-start gap-2 flex-1 min-w-0">
-                                  <Badge
-                                    variant="outline"
-                                    className={`text-[9px] uppercase font-bold shrink-0 px-1.5 py-0.2 ${
-                                      isHigh
-                                        ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
-                                        : isMed
-                                          ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
-                                          : 'border-slate-500/50 bg-slate-500/10 text-slate-300'
-                                    }`}
-                                  >
-                                    {act.priority}
-                                  </Badge>
-                                  <span className={`font-medium text-xs text-white font-sans ${isCompleted ? 'line-through text-slate-400' : ''}`}>
-                                    {act.title}
-                                  </span>
-                                </div>
-
-                                {/* Status Selector Toggle */}
-                                <div className="flex items-center gap-1 shrink-0">
-                                  {isUpdating ? (
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                                  ) : (
-                                    <select
-                                      value={act.status}
-                                      onChange={(e) => handleUpdateActionStatus(act.id, e.target.value)}
-                                      className={`text-[10px] font-mono px-2 py-1 rounded border cursor-pointer bg-background/90 transition-colors ${
-                                        isCompleted
-                                          ? 'border-emerald-500/50 text-emerald-300'
-                                          : isInProgress
-                                            ? 'border-blue-500/50 text-blue-300'
-                                            : 'border-amber-500/50 text-amber-300'
-                                      }`}
-                                    >
-                                      <option value="pending">Pending</option>
-                                      <option value="in_progress">In Progress</option>
-                                      <option value="completed">Completed</option>
-                                      <option value="dismissed">Dismissed</option>
-                                    </select>
-                                  )}
-                                </div>
-                              </div>
-
-                              {/* Action Metadata: Due Date & Source */}
-                              <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground pt-1 border-t border-border/20">
-                                <div className="flex items-center gap-1.5">
-                                  <Calendar className="h-3 w-3 text-slate-400" />
-                                  <span>
-                                    {act.due_date ? (
-                                      <span className="text-amber-300 font-semibold font-mono">Due: {act.due_date}</span>
-                                    ) : (
-                                      <span className="italic text-slate-500">No due date</span>
-                                    )}
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-slate-500">Source:</span>
-                                  <span className="text-slate-300 capitalize">{act.source?.replace('_', ' ') || 'rule based'}</span>
-                                </div>
-                              </div>
-
-                              {/* Reason / Context Footnote */}
-                              {act.reason && (
-                                <div className="text-[10px] text-slate-400 italic bg-background/50 p-1.5 rounded border border-border/20">
-                                  Reason: {act.reason}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-muted-foreground italic text-center py-2">
-                      No actionable tasks required for this document.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="pt-2 border-t border-border/40 text-[11px] font-mono text-muted-foreground space-y-1">
-                <div className="flex items-center justify-between">
-                  <span>Document ID:</span>
-                  <span className="text-slate-300 truncate max-w-[220px]">{uploadedDoc.id}</span>
-                </div>
-                {uploadedDoc.storage_path && (
-                  <div className="flex items-center justify-between">
-                    <span>Storage Path:</span>
-                    <span className="text-slate-300 truncate max-w-[220px]">{uploadedDoc.storage_path}</span>
-                  </div>
                 )}
               </div>
-            </div>
 
-            {/* Actions for uploaded document */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleReset}
-                className="text-xs gap-1.5"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Upload Another
-              </Button>
-
-              <div className="flex items-center gap-2">
-                {uploadedDoc.preview_url && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    asChild
-                    className="text-xs gap-1.5"
-                  >
-                    <a
-                      href={uploadedDoc.preview_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      View Document
-                    </a>
-                  </Button>
-                )}
-
-                {uploadedDoc.status !== "preprocessed" && uploadedDoc.status !== "ocr_completed" && uploadedDoc.status !== "classified" && uploadedDoc.status !== "sectioned" && uploadedDoc.status !== "extracted" && !preprocessResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handlePreprocess}
-                    disabled={preprocessing}
-                    className="text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20"
-                  >
-                    {preprocessing ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Preparing document...
-                      </>
-                    ) : (
-                      <>
-                        <Layers className="h-3.5 w-3.5" />
-                        Prepare for OCR
-                      </>
+              {/* RIGHT COLUMN: SUMMARY & ACTIONS (5 COLS ON DESKTOP) */}
+              <div className="lg:col-span-5 space-y-6">
+                {/* 5. SUMMARY (Phase 11 - Requirement 5: Visually Prominent) */}
+                <div className="rounded-xl border border-purple-500/40 bg-purple-950/15 p-4 space-y-4 shadow-lg shadow-purple-950/20">
+                  <div className="flex items-center justify-between border-b border-purple-500/20 pb-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-purple-400" />
+                      <h4 className="text-sm font-bold text-white">Document Summary</h4>
+                    </div>
+                    {summaryResult && (
+                      <Badge variant="outline" className="text-[10px] font-mono border-purple-500/40 text-purple-300 bg-purple-500/10">
+                        {summaryResult.document_type || 'Executive'}
+                      </Badge>
                     )}
-                  </Button>
-                ) : !ocrResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handleRunOcr}
-                    disabled={runningOcr}
-                    className="text-xs gap-1.5 bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/20"
-                  >
-                    {runningOcr ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        {ocrProgressText || "Running OCR..."}
-                      </>
-                    ) : (
-                      <>
-                        <ScanText className="h-3.5 w-3.5" />
-                        Run OCR
-                      </>
-                    )}
-                  </Button>
-                ) : !classificationResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handleClassify}
-                    disabled={classifying}
-                    className="text-xs gap-1.5 bg-purple-600 hover:bg-purple-500 text-white shadow-md shadow-purple-500/20"
-                  >
-                    {classifying ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Classifying document...
-                      </>
-                    ) : (
-                      <>
-                        <Tag className="h-3.5 w-3.5" />
-                        Classify Document
-                      </>
-                    )}
-                  </Button>
-                ) : classificationResult.document_type === "unknown" ? (
-                  <Badge variant="outline" className="text-xs gap-1 py-1 px-2.5 border-amber-500/40 text-amber-300">
-                    <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
-                    Sections & Extraction Skipped (Unknown Type)
-                  </Badge>
-                ) : !sectionsResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handleDetectSections}
-                    disabled={detectingSections}
-                    className="text-xs gap-1.5 bg-amber-600 hover:bg-amber-500 text-white shadow-md shadow-amber-500/20 cursor-pointer"
-                  >
-                    {detectingSections ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Detecting Sections...
-                      </>
-                    ) : (
-                      <>
-                        <FolderTree className="h-3.5 w-3.5" />
-                        Detect Sections
-                      </>
-                    )}
-                  </Button>
-                ) : !extractionResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handleExtractFields}
-                    disabled={extracting}
-                    className="text-xs gap-1.5 bg-cyan-600 hover:bg-cyan-500 text-white shadow-md shadow-cyan-500/20 cursor-pointer"
-                  >
-                    {extracting ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Extracting structured information...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Extract Information
-                      </>
-                    )}
-                  </Button>
-                ) : !validationResult ? (
-                  <Button
-                    size="sm"
-                    onClick={handleValidate}
-                    disabled={validating}
-                    className="text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-500/20 cursor-pointer"
-                  >
-                    {validating ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        Validating deterministic rules...
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        Normalize & Validate
-                      </>
-                    )}
-                  </Button>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      size="sm"
-                      onClick={handleGenerateInsights}
-                      disabled={generatingInsights || recoveringVision || validating}
-                      className="text-xs gap-1.5 bg-gradient-to-r from-amber-600 to-emerald-600 hover:from-amber-500 hover:to-emerald-500 text-white shadow-md shadow-amber-500/20 cursor-pointer"
-                    >
-                      {generatingInsights ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          Generating Insights...
-                        </>
-                      ) : (
-                        <>
-                          <ListTodo className="h-3.5 w-3.5" />
-                          {summaryResult && actionsResult ? 'Regenerate Insights' : 'Generate Summary & Actions'}
-                        </>
-                      )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={handleVisionFallback}
-                      disabled={recoveringVision || validating || generatingInsights}
-                      className="text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20 cursor-pointer"
-                    >
-                      {recoveringVision ? (
-                        <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          Recovering...
-                        </>
-                      ) : (
-                        <>
-                          <Eye className="h-3.5 w-3.5" />
-                          Recover Low-Confidence
-                        </>
-                      )}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={handleValidate}
-                      disabled={validating || recoveringVision || generatingInsights}
-                      className="text-xs gap-1 border-emerald-500/30 text-emerald-300 hover:bg-emerald-950/30 cursor-pointer"
-                    >
-                      {validating ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <RotateCcw className="h-3 w-3" />
-                      )}
-                      Re-validate
-                    </Button>
-                    <Badge
-                      variant={validationResult.document_status === "completed" ? "success" : "warning"}
-                      className={`text-xs gap-1 py-1 px-2.5 ${
-                        validationResult.document_status === "completed"
-                          ? "bg-emerald-600/20 border-emerald-500/40 text-emerald-300"
-                          : "bg-amber-600/20 border-amber-500/40 text-amber-300"
-                      }`}
-                    >
-                      {validationResult.document_status === "completed" ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                      ) : (
-                        <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
-                      )}
-                      {validationResult.document_status === "completed" ? "Validation Passed" : "Needs Review"}
-                    </Badge>
                   </div>
-                )}
+
+                  {summaryResult ? (
+                    <div className="space-y-3.5">
+                      {/* Executive Summary Narrative */}
+                      <div className="rounded-lg bg-background/80 p-3 border border-purple-500/20 text-slate-100 text-xs font-sans leading-relaxed">
+                        {summaryResult.summary || summaryResult.summary_text || 'No summary text available.'}
+                      </div>
+
+                      {/* Key Points (Up to 5) */}
+                      {summaryResult.key_points?.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                            <CheckSquare className="h-3.5 w-3.5 text-emerald-400" />
+                            Key Points ({summaryResult.key_points.length})
+                          </div>
+                          <div className="space-y-1">
+                            {summaryResult.key_points.map((point, idx) => (
+                              <div
+                                key={idx}
+                                className="flex items-start gap-2 rounded bg-background/60 p-2 border border-border/30 text-[11px] text-slate-300 font-sans"
+                              >
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                                <span className="flex-1">{point}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Review Items (Up to 5) */}
+                      {summaryResult.review_items?.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5">
+                            <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                            Attention Required ({summaryResult.review_items.length})
+                          </div>
+                          <div className="space-y-1">
+                            {summaryResult.review_items.map((item, idx) => (
+                              <div
+                                key={idx}
+                                className="flex items-start gap-2 rounded bg-amber-950/20 p-2 border border-amber-500/30 text-[11px] text-amber-200 font-sans"
+                              >
+                                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0" />
+                                <span className="flex-1">{item}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg bg-card/40 border border-border/40 p-6 text-center text-xs text-muted-foreground space-y-1">
+                      <Sparkles className="h-6 w-6 text-muted-foreground mx-auto mb-1 opacity-40" />
+                      <div>Executive summary pending.</div>
+                      <div className="text-[11px]">Click &quot;Summary &amp; Actions&quot; or run &quot;Process Document&quot;.</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 6. ACTIONS (Phase 11 - Requirement 6) */}
+                <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/15 p-4 space-y-4 shadow-lg shadow-cyan-950/20">
+                  <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3">
+                    <div className="flex items-center gap-2">
+                      <ListTodo className="h-4 w-4 text-cyan-400" />
+                      <h4 className="text-sm font-bold text-white">Action Items</h4>
+                    </div>
+                    {actionsResult && (
+                      <Badge variant="outline" className="text-[10px] font-mono border-cyan-500/40 text-cyan-300 bg-cyan-500/10">
+                        {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0} / {actionsResult.total_actions ?? 0} Done
+                      </Badge>
+                    )}
+                  </div>
+
+                  {actionsResult ? (
+                    <div className="space-y-3">
+                      {/* Metric Counters */}
+                      <div className="grid grid-cols-4 gap-1.5 text-center font-mono text-[10px]">
+                        <div className="rounded bg-background/60 p-2 border border-border/40">
+                          <div className="text-muted-foreground uppercase text-[9px]">Total</div>
+                          <div className="text-xs font-bold text-white mt-0.5">{actionsResult.total_actions ?? 0}</div>
+                        </div>
+                        <div className="rounded bg-background/60 p-2 border border-rose-500/30">
+                          <div className="text-rose-400 uppercase text-[9px]">High</div>
+                          <div className="text-xs font-bold text-rose-400 mt-0.5">{actionsResult.high_priority_count ?? 0}</div>
+                        </div>
+                        <div className="rounded bg-background/60 p-2 border border-amber-500/30">
+                          <div className="text-amber-400 uppercase text-[9px]">Pending</div>
+                          <div className="text-xs font-bold text-amber-400 mt-0.5">
+                            {actionsResult.actions?.filter((a) => a.status === 'pending').length ?? 0}
+                          </div>
+                        </div>
+                        <div className="rounded bg-background/60 p-2 border border-emerald-500/30">
+                          <div className="text-emerald-400 uppercase text-[9px]">Done</div>
+                          <div className="text-xs font-bold text-emerald-400 mt-0.5">
+                            {actionsResult.actions?.filter((a) => a.status === 'completed').length ?? 0}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Action Items List */}
+                      {actionsResult.actions?.length > 0 ? (
+                        <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
+                          {actionsResult.actions.map((act) => {
+                            const isHigh = act.priority === 'high';
+                            const isMed = act.priority === 'medium';
+                            const isCompleted = act.status === 'completed';
+                            const isInProgress = act.status === 'in_progress';
+                            const isUpdating = actionUpdatingId === act.id;
+                            const actionTitle = act.action || act.title || 'Untitled Action';
+
+                            return (
+                              <div
+                                key={act.id}
+                                className={`rounded-lg p-3 border text-xs space-y-2 transition-all ${
+                                  isCompleted
+                                    ? 'border-emerald-500/30 bg-emerald-950/10 opacity-75'
+                                    : isInProgress
+                                      ? 'border-blue-500/40 bg-blue-950/20'
+                                      : isHigh
+                                        ? 'border-rose-500/40 bg-rose-950/15'
+                                        : 'border-border/40 bg-background/70'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  {/* Action & Priority */}
+                                  <div className="flex items-start gap-2 flex-1 min-w-0">
+                                    <Badge
+                                      variant="outline"
+                                      className={`text-[9px] uppercase font-bold shrink-0 px-1.5 py-0.2 ${
+                                        isHigh
+                                          ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
+                                          : isMed
+                                            ? 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                                            : 'border-slate-500/50 bg-slate-500/10 text-slate-300'
+                                      }`}
+                                    >
+                                      {act.priority}
+                                    </Badge>
+                                    <span className={`font-medium text-xs text-white font-sans ${isCompleted ? 'line-through text-slate-400' : ''}`}>
+                                      {actionTitle}
+                                    </span>
+                                  </div>
+
+                                  {/* Status Selector Dropdown (Existing API status update) */}
+                                  <div className="shrink-0">
+                                    {isUpdating ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                                    ) : (
+                                      <select
+                                        value={act.status}
+                                        onChange={(e) => handleUpdateActionStatus(act.id, e.target.value)}
+                                        className={`text-[10px] font-mono px-2 py-1 rounded border cursor-pointer bg-background transition-colors ${
+                                          isCompleted
+                                            ? 'border-emerald-500/50 text-emerald-300'
+                                            : isInProgress
+                                              ? 'border-blue-500/50 text-blue-300'
+                                              : 'border-amber-500/50 text-amber-300'
+                                        }`}
+                                      >
+                                        <option value="pending">Pending</option>
+                                        <option value="in_progress">In Progress</option>
+                                        <option value="completed">Completed</option>
+                                        <option value="dismissed">Dismissed</option>
+                                      </select>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Due Date & Source */}
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground pt-1 border-t border-border/20">
+                                  <div className="flex items-center gap-1.5">
+                                    <Calendar className="h-3 w-3 text-slate-400" />
+                                    <span>
+                                      {act.due_date ? (
+                                        <span className="text-amber-300 font-semibold font-mono">Due: {act.due_date}</span>
+                                      ) : (
+                                        <span className="italic text-slate-500">No due date</span>
+                                      )}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-slate-500">Source:</span>
+                                    <span className="text-slate-300 capitalize">{act.source?.replace('_', ' ') || 'rule based'}</span>
+                                  </div>
+                                </div>
+
+                                {/* Grounding Reason Footnote */}
+                                {act.reason && (
+                                  <div className="text-[10px] text-slate-400 italic bg-background/50 p-1.5 rounded border border-border/20">
+                                    Reason: {act.reason}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="text-xs text-muted-foreground italic text-center py-4">
+                          No actionable tasks extracted for this document.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg bg-card/40 border border-border/40 p-6 text-center text-xs text-muted-foreground space-y-1">
+                      <ListTodo className="h-6 w-6 text-muted-foreground mx-auto mb-1 opacity-40" />
+                      <div>Action items pending.</div>
+                      <div className="text-[11px]">Click &quot;Summary &amp; Actions&quot; or run &quot;Process Document&quot;.</div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
         ) : (
-          /* State 2: Dropzone & File Selection */
+          /* ============================================================ */
+          /* STATE 2: DOCUMENT DROPZONE & FILE SELECTION                  */
+          /* ============================================================ */
           <div className="space-y-4">
             <div
               onDragEnter={handleDrag}
@@ -1763,10 +1908,11 @@ export default function DocumentUpload({ onUploadSuccess }) {
               onDragOver={handleDrag}
               onDrop={handleDrop}
               onClick={() => inputRef.current?.click()}
-              className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${dragActive
-                ? 'border-primary bg-primary/10 scale-[1.01]'
-                : 'border-border/60 hover:border-primary/50 hover:bg-card/50'
-                }`}
+              className={`relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-8 text-center cursor-pointer transition-all duration-200 ${
+                dragActive
+                  ? 'border-primary bg-primary/10 scale-[1.01]'
+                  : 'border-border/60 hover:border-primary/50 hover:bg-card/50'
+              }`}
             >
               <input
                 ref={inputRef}
@@ -1782,7 +1928,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
               <div className="space-y-1 mb-3">
                 <p className="text-sm font-medium text-white">
-                  Drag & drop your document here
+                  Drag &amp; drop your document here
                 </p>
                 <p className="text-xs text-muted-foreground">
                   or <span className="text-primary font-semibold underline underline-offset-2">browse file</span> from your computer
@@ -1797,7 +1943,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
               </div>
             </div>
 
-            {/* Selected File Inspection & Action */}
+            {/* Selected File Inspection Card */}
             {selectedFile && (
               <div className="rounded-lg border border-primary/30 bg-primary/5 p-3.5 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3 overflow-hidden">
