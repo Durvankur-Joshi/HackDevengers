@@ -113,6 +113,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [ocrProgressText, setOcrProgressText] = useState('');
   const [ocrResult, setOcrResult] = useState(null);
   const [viewMode, setViewMode] = useState('full');
+  const [showRawOcr, setShowRawOcr] = useState(false);
 
   const [classifying, setClassifying] = useState(false);
   const [classificationResult, setClassificationResult] = useState(null);
@@ -150,6 +151,9 @@ export default function DocumentUpload({ onUploadSuccess }) {
   const [fieldStatusFilter, setFieldStatusFilter] = useState('all');
 
   const inputRef = useRef(null);
+
+  // Consolidated active error to eliminate duplicate error banners
+  const activeError = error || validationError || extractionError || sectionsError || visionError || insightsError;
 
   const validateFile = (file) => {
     if (!file) return false;
@@ -382,7 +386,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
     }
   };
 
-  // End-to-End Pipeline Execution (Phase 12 requirement 10)
+  // End-to-End Pipeline Execution
   const handleProcessDocument = async () => {
     if (!uploadedDoc?.id || isProcessingAll) return;
     setIsProcessingAll(true);
@@ -446,7 +450,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
       // Check Unknown Document Archetype
       if (currentClass.document_type === 'unknown') {
-        // Unknown archetype: halt sections & extraction gracefully per requirements
         setProcessStepText('Document archetype is Unknown. Downstream extraction safely skipped.');
         setIsProcessingAll(false);
         return;
@@ -568,6 +571,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
     setExpandedFields({});
     setFieldSearchFilter('');
     setFieldStatusFilter('all');
+    setShowRawOcr(false);
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -798,17 +802,17 @@ export default function DocumentUpload({ onUploadSuccess }) {
           </div>
 
           <Badge variant="outline" className="text-[11px] font-mono border-border/50 text-muted-foreground">
-            Phase 12 Unified Pipeline
+            Automated Pipeline
           </Badge>
         </div>
       </CardHeader>
 
       <CardContent className="pt-5 space-y-6">
-        {/* Global Error Banner */}
-        {error && (
+        {/* Consolidated Error Banner */}
+        {activeError && (
           <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/25 p-3.5 text-xs text-rose-300">
             <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-            <div className="flex-1 font-medium">{error}</div>
+            <div className="flex-1 font-medium">{activeError}</div>
           </div>
         )}
 
@@ -816,9 +820,9 @@ export default function DocumentUpload({ onUploadSuccess }) {
         {/* STATE 1: ACTIVE DOCUMENT DASHBOARD                          */}
         {/* ============================================================ */}
         {uploadedDoc ? (
-          <div className="space-y-6">
+          <div className="space-y-5">
             {/* 1. DOCUMENT HEADER & META BAR */}
-            <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-4">
+            <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 {/* File info */}
                 <div className="flex items-start gap-3">
@@ -956,11 +960,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
                             <span className="h-2 w-2 rounded-full bg-slate-600" />
                           )}
                           <span>{stage.label}</span>
-                          {isSkipped && (
-                            <span className="text-[9px] uppercase font-bold text-amber-400/80">
-                              (Skipped)
-                            </span>
-                          )}
                         </div>
 
                         {!isLast && (
@@ -971,6 +970,118 @@ export default function DocumentUpload({ onUploadSuccess }) {
                       </React.Fragment>
                     );
                   })}
+                </div>
+              </div>
+
+              {/* STREAMLINED STAGE ACTION CONTROLS */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 px-1">
+                <span className="text-[11px] font-medium text-muted-foreground">
+                  Individual Controls:
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {!preprocessResult && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handlePreprocess}
+                      disabled={preprocessing || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {preprocessing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Layers className="h-3 w-3 text-indigo-400" />}
+                      Preprocess
+                    </Button>
+                  )}
+
+                  {!ocrResult && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleRunOcr}
+                      disabled={runningOcr || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {runningOcr ? <Loader2 className="h-3 w-3 animate-spin" /> : <ScanText className="h-3 w-3 text-blue-400" />}
+                      Run OCR
+                    </Button>
+                  )}
+
+                  {!classificationResult && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleClassify}
+                      disabled={classifying || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {classifying ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3 text-purple-400" />}
+                      Classify
+                    </Button>
+                  )}
+
+                  {!isUnknownArchetype && !sectionsResult && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleDetectSections}
+                      disabled={detectingSections || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {detectingSections ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderTree className="h-3 w-3 text-amber-400" />}
+                      Sections
+                    </Button>
+                  )}
+
+                  {!isUnknownArchetype && !extractionResult && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleExtractFields}
+                      disabled={extracting || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {extracting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3 text-cyan-400" />}
+                      Extract
+                    </Button>
+                  )}
+
+                  {!isUnknownArchetype && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleValidate}
+                      disabled={validating || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {validating ? <Loader2 className="h-3 w-3 animate-spin" /> : <ShieldCheck className="h-3 w-3 text-emerald-400" />}
+                      {validationResult ? 'Re-Validate' : 'Validate'}
+                    </Button>
+                  )}
+
+                  {!isUnknownArchetype && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleVisionFallback}
+                      disabled={recoveringVision || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {recoveringVision ? <Loader2 className="h-3 w-3 animate-spin" /> : <Eye className="h-3 w-3 text-indigo-400" />}
+                      Vision Check
+                    </Button>
+                  )}
+
+                  {!isUnknownArchetype && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleGenerateInsights}
+                      disabled={generatingInsights || isProcessingAll}
+                      className="text-xs h-7 px-2.5 gap-1.5"
+                    >
+                      {generatingInsights ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListTodo className="h-3 w-3 text-purple-400" />}
+                      {summaryResult && actionsResult ? 'Regenerate Insights' : 'Summary & Actions'}
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1065,151 +1176,6 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   In accordance with the pipeline safety policy, sections, field extraction, validation, and insights
                   were safely skipped to prevent hallucinated data.
                 </p>
-              </div>
-            )}
-
-            {/* INDIVIDUAL CONTROLS STRIP (Preserves manual testing & granular demonstration) */}
-            <div className="rounded-lg border border-border/40 bg-background/40 p-3 space-y-2">
-              <div className="text-[11px] font-semibold text-muted-foreground uppercase flex items-center justify-between">
-                <span>Manual Stage Trigger Controls</span>
-                <span className="text-[10px] text-muted-foreground">Individual inspection</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {!preprocessResult && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handlePreprocess}
-                    disabled={preprocessing || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {preprocessing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Layers className="h-3.5 w-3.5 text-indigo-400" />}
-                    Prepare for OCR
-                  </Button>
-                )}
-
-                {!ocrResult && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleRunOcr}
-                    disabled={runningOcr || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {runningOcr ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanText className="h-3.5 w-3.5 text-blue-400" />}
-                    Run OCR
-                  </Button>
-                )}
-
-                {!classificationResult && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleClassify}
-                    disabled={classifying || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {classifying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Brain className="h-3.5 w-3.5 text-purple-400" />}
-                    Classify Document
-                  </Button>
-                )}
-
-                {!isUnknownArchetype && !sectionsResult && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleDetectSections}
-                    disabled={detectingSections || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {detectingSections ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderTree className="h-3.5 w-3.5 text-amber-400" />}
-                    Detect Sections
-                  </Button>
-                )}
-
-                {!isUnknownArchetype && !extractionResult && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleExtractFields}
-                    disabled={extracting || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {extracting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 text-cyan-400" />}
-                    Extract Fields
-                  </Button>
-                )}
-
-                {!isUnknownArchetype && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleValidate}
-                    disabled={validating || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {validating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />}
-                    {validationResult ? 'Re-Validate' : 'Normalize & Validate'}
-                  </Button>
-                )}
-
-                {!isUnknownArchetype && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleVisionFallback}
-                    disabled={recoveringVision || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {recoveringVision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5 text-indigo-400" />}
-                    Vision Fallback
-                  </Button>
-                )}
-
-                {!isUnknownArchetype && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleGenerateInsights}
-                    disabled={generatingInsights || isProcessingAll}
-                    className="text-xs gap-1.5"
-                  >
-                    {generatingInsights ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ListTodo className="h-3.5 w-3.5 text-purple-400" />}
-                    {summaryResult && actionsResult ? 'Regenerate Insights' : 'Summary & Actions'}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            {/* STAGE ERROR BANNERS */}
-            {sectionsError && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1">{sectionsError}</div>
-              </div>
-            )}
-            {extractionError && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1">{extractionError}</div>
-              </div>
-            )}
-            {validationError && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1">{validationError}</div>
-              </div>
-            )}
-            {visionError && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1">{visionError}</div>
-              </div>
-            )}
-            {insightsError && (
-              <div className="flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300">
-                <AlertCircle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
-                <div className="flex-1">{insightsError}</div>
               </div>
             )}
 
@@ -1519,7 +1485,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                     </div>
                   ) : (
                     <div className="text-xs text-muted-foreground italic py-2 text-center">
-                      Deterministic validation not yet executed. Click &quot;Normalize &amp; Validate&quot; or &quot;Process Document&quot;.
+                      Deterministic validation not yet executed. Click &quot;Validate&quot; or &quot;Process Document&quot;.
                     </div>
                   )}
                 </div>
@@ -1617,52 +1583,68 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   )}
                 </div>
 
-                {/* RAW OCR INSPECTION TOGGLE */}
+                {/* RAW OCR INSPECTION ACCORDION */}
                 {ocrResult && (
-                  <div className="rounded-xl border border-border/60 bg-background/50 p-4 space-y-3">
-                    <div className="flex items-center justify-between border-b border-border/40 pb-2">
+                  <div className="rounded-xl border border-border/60 bg-background/50 overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setShowRawOcr(!showRawOcr)}
+                      className="w-full flex items-center justify-between p-3.5 text-xs font-semibold text-slate-300 hover:bg-white/5 transition-colors cursor-pointer text-left"
+                    >
                       <div className="flex items-center gap-2">
                         <ScanText className="h-4 w-4 text-blue-400" />
-                        <h4 className="text-sm font-bold text-white">Raw OCR Text</h4>
+                        <span>Raw OCR Text</span>
+                        <span className="text-[11px] font-mono text-muted-foreground">
+                          ({ocrResult.page_count} {ocrResult.page_count === 1 ? 'page' : 'pages'} • {ocrResult.metadata?.block_count ?? 0} blocks)
+                        </span>
                       </div>
-                      <div className="flex items-center gap-1 bg-background/80 p-0.5 rounded border border-border/40 text-[10px]">
-                        <button
-                          type="button"
-                          onClick={() => setViewMode('full')}
-                          className={`px-2 py-0.5 rounded cursor-pointer ${viewMode === 'full' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
-                        >
-                          Full Text
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setViewMode('blocks')}
-                          className={`px-2 py-0.5 rounded cursor-pointer ${viewMode === 'blocks' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
-                        >
-                          Blocks ({ocrResult.metadata?.block_count ?? 0})
-                        </button>
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <span>{showRawOcr ? 'Hide' : 'Inspect Text'}</span>
+                        {showRawOcr ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                       </div>
-                    </div>
+                    </button>
 
-                    {viewMode === 'full' ? (
-                      <div className="max-h-48 overflow-y-auto rounded-md bg-background/80 p-2.5 text-[11px] font-mono text-slate-300 whitespace-pre-wrap leading-relaxed border border-border/40 select-text">
-                        {ocrResult.full_text || 'No readable text detected.'}
-                      </div>
-                    ) : (
-                      <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
-                        {ocrResult.pages?.flatMap((p) => p.blocks || []).slice(0, 50).map((b, idx) => (
-                          <div key={idx} className="rounded bg-background/70 p-2 border border-border/40 flex items-start justify-between gap-2 text-[11px]">
-                            <div className="truncate text-slate-200 font-mono flex-1">
-                              <span className="text-muted-foreground mr-1.5">#{b.block_index}</span>
-                              {b.text}
-                            </div>
-                            <div className="shrink-0 flex items-center gap-1.5 text-[10px] font-mono">
-                              <span className="text-muted-foreground">P{b.page_number}</span>
-                              <span className={b.confidence != null && b.confidence >= 80 ? 'text-emerald-400' : 'text-amber-400'}>
-                                {b.confidence != null ? `${b.confidence}%` : 'N/A'}
-                              </span>
-                            </div>
+                    {showRawOcr && (
+                      <div className="p-3.5 pt-0 space-y-3 border-t border-border/40">
+                        <div className="flex items-center justify-end gap-1 pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setViewMode('full')}
+                            className={`px-2 py-0.5 rounded text-[10px] cursor-pointer ${viewMode === 'full' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                          >
+                            Full Text
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setViewMode('blocks')}
+                            className={`px-2 py-0.5 rounded text-[10px] cursor-pointer ${viewMode === 'blocks' ? 'bg-primary text-white font-medium' : 'text-muted-foreground hover:text-white'}`}
+                          >
+                            Blocks ({ocrResult.metadata?.block_count ?? 0})
+                          </button>
+                        </div>
+
+                        {viewMode === 'full' ? (
+                          <div className="max-h-48 overflow-y-auto rounded-md bg-background/80 p-2.5 text-[11px] font-mono text-slate-300 whitespace-pre-wrap leading-relaxed border border-border/40 select-text">
+                            {ocrResult.full_text || 'No readable text detected.'}
                           </div>
-                        ))}
+                        ) : (
+                          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                            {ocrResult.pages?.flatMap((p) => p.blocks || []).slice(0, 50).map((b, idx) => (
+                              <div key={idx} className="rounded bg-background/70 p-2 border border-border/40 flex items-start justify-between gap-2 text-[11px]">
+                                <div className="truncate text-slate-200 font-mono flex-1">
+                                  <span className="text-muted-foreground mr-1.5">#{b.block_index}</span>
+                                  {b.text}
+                                </div>
+                                <div className="shrink-0 flex items-center gap-1.5 text-[10px] font-mono">
+                                  <span className="text-muted-foreground">P{b.page_number}</span>
+                                  <span className={b.confidence != null && b.confidence >= 80 ? 'text-emerald-400' : 'text-amber-400'}>
+                                    {b.confidence != null ? `${b.confidence}%` : 'N/A'}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1671,12 +1653,12 @@ export default function DocumentUpload({ onUploadSuccess }) {
 
               {/* RIGHT COLUMN: SUMMARY & ACTIONS (5 COLS ON DESKTOP) */}
               <div className="lg:col-span-5 space-y-6">
-                {/* 5. SUMMARY (Phase 11 - Requirement 5: Visually Prominent) */}
+                {/* 5. SUMMARY (Requirement 5: Visually Prominent) */}
                 <div className="rounded-xl border border-purple-500/40 bg-purple-950/15 p-4 space-y-4 shadow-lg shadow-purple-950/20">
                   <div className="flex items-center justify-between border-b border-purple-500/20 pb-3">
                     <div className="flex items-center gap-2">
                       <Sparkles className="h-4 w-4 text-purple-400" />
-                      <h4 className="text-sm font-bold text-white">Document Summary</h4>
+                      <h4 className="text-sm font-bold text-white">Executive Summary</h4>
                     </div>
                     {summaryResult && (
                       <Badge variant="outline" className="text-[10px] font-mono border-purple-500/40 text-purple-300 bg-purple-500/10">
@@ -1743,7 +1725,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                   )}
                 </div>
 
-                {/* 6. ACTIONS (Phase 11 - Requirement 6) */}
+                {/* 6. ACTIONS (Requirement 6) */}
                 <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/15 p-4 space-y-4 shadow-lg shadow-cyan-950/20">
                   <div className="flex items-center justify-between border-b border-cyan-500/20 pb-3">
                     <div className="flex items-center gap-2">
@@ -1827,7 +1809,7 @@ export default function DocumentUpload({ onUploadSuccess }) {
                                     </span>
                                   </div>
 
-                                  {/* Status Selector Dropdown (Existing API status update) */}
+                                  {/* Status Selector Dropdown */}
                                   <div className="shrink-0">
                                     {isUpdating ? (
                                       <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />

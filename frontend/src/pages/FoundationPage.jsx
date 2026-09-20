@@ -1,21 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '@/services/api';
 import DocumentUpload from '@/components/DocumentUpload';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { 
-  Activity, 
-  CheckCircle2, 
-  XCircle, 
-  RefreshCw, 
-  Server, 
-  Layers, 
-  ArrowRight,
-  ShieldCheck,
-  Terminal,
-  Zap
-} from 'lucide-react';
+import { Layers, Zap } from 'lucide-react';
 
 export default function FoundationPage() {
   const [healthState, setHealthState] = useState({
@@ -82,10 +69,10 @@ export default function FoundationPage() {
 
       {/* Main Foundation Showcase */}
       <main className="relative z-10 mx-auto my-auto w-full max-w-6xl py-8 text-center">
-        {/* Foundation Tag */}
+        {/* Product Tag */}
         <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3.5 py-1 text-xs font-medium text-primary mb-5 backdrop-blur-md">
           <Zap className="h-3.5 w-3.5" />
-          Phase 12 — Final Document Dashboard &amp; End-to-End Pipeline
+          Automated Document-to-Action Engine
         </div>
 
         {/* Hero Title */}
@@ -101,125 +88,9 @@ export default function FoundationPage() {
           Transform messy documents into structured, validated and actionable information.
         </p>
 
-        {/* Document Ingestion Zone */}
-        <div className="mb-10 w-full">
+        {/* Document Ingestion & Pipeline Dashboard */}
+        <div className="w-full">
           <DocumentUpload />
-        </div>
-
-        {/* Live System Connectivity Card */}
-        <Card className="mx-auto max-w-xl border-border/60 bg-card/60 backdrop-blur-xl shadow-2xl text-left">
-          <CardHeader className="pb-3 border-b border-border/40">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <Server className="h-4 w-4 text-primary" />
-                <CardTitle className="text-base text-white">System Connectivity & Health</CardTitle>
-              </div>
-              <Badge variant="outline" className="text-xs font-mono text-muted-foreground border-border/50">
-                GET /health
-              </Badge>
-            </div>
-            <CardDescription className="text-xs text-muted-foreground">
-              Verifying frontend ↔ FastAPI backend API connection
-            </CardDescription>
-          </CardHeader>
-
-          <CardContent className="pt-5 space-y-4">
-            {/* Status indicator row */}
-            <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/50 p-3.5">
-              <div className="flex items-center gap-3">
-                {healthState.loading ? (
-                  <RefreshCw className="h-5 w-5 text-muted-foreground animate-spin" />
-                ) : isConnected ? (
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
-                    <CheckCircle2 className="h-5 w-5" />
-                  </div>
-                ) : (
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-500/20 text-rose-400">
-                    <XCircle className="h-5 w-5" />
-                  </div>
-                )}
-                <div>
-                  <div className="text-sm font-semibold text-white flex items-center gap-2">
-                    Backend Status:{" "}
-                    <span className={isConnected ? "text-emerald-400" : "text-rose-400"}>
-                      {healthState.status}
-                    </span>
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    Endpoint: <code className="text-slate-300 font-mono">{api.getBaseUrl()}/health</code>
-                  </div>
-                </div>
-              </div>
-
-              {healthState.latencyMs !== null && (
-                <div className="text-right">
-                  <span className="text-xs font-mono text-muted-foreground block">Latency</span>
-                  <span className="text-xs font-mono font-semibold text-emerald-400">
-                    {healthState.latencyMs} ms
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Health payload output */}
-            {isConnected && healthState.rawData && (
-              <div className="rounded-lg border border-emerald-500/20 bg-emerald-950/10 p-3 text-xs font-mono text-slate-300">
-                <div className="text-muted-foreground text-[10px] uppercase tracking-wider mb-1 flex items-center gap-1">
-                  <Terminal className="h-3 w-3" /> Response Payload
-                </div>
-                <pre className="text-emerald-300">{JSON.stringify(healthState.rawData, null, 2)}</pre>
-              </div>
-            )}
-
-            {/* Error output if disconnected */}
-            {!isConnected && healthState.error && (
-              <div className="rounded-lg border border-rose-500/20 bg-rose-950/10 p-3 text-xs font-mono text-rose-300">
-                <div className="text-muted-foreground text-[10px] uppercase tracking-wider mb-1">
-                  Connection Error
-                </div>
-                <div>{healthState.error}</div>
-              </div>
-            )}
-
-            {/* Action buttons and info */}
-            <div className="flex items-center justify-between pt-2">
-              <div className="text-xs text-muted-foreground">
-                {healthState.lastChecked && `Last checked: ${healthState.lastChecked}`}
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={checkStatus}
-                disabled={healthState.loading}
-                className="gap-1.5 text-xs"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${healthState.loading ? "animate-spin" : ""}`} />
-                Ping Health
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Readiness Checklist */}
-        <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-3 text-left max-w-xl mx-auto">
-          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
-              <ShieldCheck className="h-3.5 w-3.5" /> Frontend Ready
-            </div>
-            <p className="text-[11px] text-muted-foreground">React + Vite + Tailwind + shadcn/ui configured</p>
-          </div>
-          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
-              <ShieldCheck className="h-3.5 w-3.5" /> Backend Ready
-            </div>
-            <p className="text-[11px] text-muted-foreground">FastAPI + CORS + Health endpoint verified</p>
-          </div>
-          <div className="p-3 rounded-lg border border-border/40 bg-card/40 backdrop-blur-sm">
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-400 mb-1">
-              <ShieldCheck className="h-3.5 w-3.5" /> Ingestion Ready
-            </div>
-            <p className="text-[11px] text-muted-foreground">Supabase Storage + PostgreSQL metadata active</p>
-          </div>
         </div>
       </main>
 
